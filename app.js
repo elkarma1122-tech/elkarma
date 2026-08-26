@@ -1150,6 +1150,8 @@ function userRow(u) {
 
 function openUserPermForm(uid) {
   const u = state.users[uid];
+  if (!u) return;
+
   const permsHtml = PERMISSIONS.map(p => `
     <div class="perm-item">
       <input type="checkbox" id="perm_${p.key}" data-key="${p.key}" ${u.permissions?.[p.key] ? "checked" : ""}>
@@ -1178,12 +1180,22 @@ function openUserPermForm(uid) {
       <button class="btn btn-ghost" id="mCancel">إلغاء</button>
     </div>
   `);
-  $("#mClose").onclick = $("#mCancel").onclick = closeModal;
+  document.getElementById("mClose").onclick = closeModal;
+  document.getElementById("userPermForm").onsubmit = async (e) => {
+    e.preventDefault();
+    const role = document.getElementById("userRole").value;
+    const permissions = {};
+    PERMISSIONS.forEach(p => {
+      permissions[p.key] = document.getElementById(`perm_${p.key}`)?.checked || false;
+    });
 
-  $("#userRole").addEventListener("change", (e) => {
-    const defs = defaultPermissions(e.target.value || null);
-    PERMISSIONS.forEach(p => { $("#perm_" + p.key).checked = !!defs[p.key]; });
-  });
+    const ok = await runAsync(async () => {
+      await update(ref(db, "users/" + uid), { role, permissions });
+    }, { successMsg: "تم تحديث صلاحيات المستخدم بنجاح" });
+
+    if (ok) closeModal();
+  };
+}
 
   $("#saveUserBtn").onclick = async () => {
     const role = $("#userRole").value || null;
