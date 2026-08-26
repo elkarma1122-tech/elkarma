@@ -143,37 +143,62 @@ function translateAuthError(err) {
     "auth/invalid-credential": "بيانات الدخول غير صحيحة",
     "auth/email-already-in-use": "البريد الإلكتروني مُستخدم بالفعل",
     "auth/weak-password": "كلمة المرور ضعيفة (6 أحرف على الأقل)",
+    "custom/username-not-found": "لا يوجد حساب بهذا الاسم",
+    "custom/username-taken": "اسم المستخدم ده محجوز، جرّب اسم تاني",
+    "custom/invalid-username": "اسم المستخدم لازم يكون 3-20 حرف إنجليزي أو رقم (يسمح بـ _ و .)",
   };
   return map[code] || "حصل خطأ، حاول تاني";
 }
 
+// فايربيز أوث بيشتغل بالإيميل، فبنبني إيميل داخلي (وهمي) من اسم المستخدم
+// عشان المستخدم يحس إنه بيدخل بـ"يوزر" عادي بس، من غير ما يكتب إيميل خالص
+const USERNAME_DOMAIN = "nursery-app.local";
+function usernameToEmail(username) { return `${username.toLowerCase()}@${USERNAME_DOMAIN}`; }
+function normalizeUsername(u) { return (u || "").trim().toLowerCase(); }
+
 $("#loginForm").addEventListener("submit", async (e) => {
   e.preventDefault();
+  const username = normalizeUsername($("#loginUsername").value);
   try {
-    await signInWithEmailAndPassword(auth, $("#loginEmail").value.trim(), $("#loginPassword").value);
+    const snap = await get(ref(db, "usernames/" + username));
+    if (!snap.exists()) { showAuthError({ code: "custom/username-not-found" }); return; }
+    const email = snap.val().email;
+    await signInWithEmailAndPassword(auth, email, $("#loginPassword").value);
   } catch (err) { showAuthError(err); }
 });
 
 $("#signupForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const name = $("#signupName").value.trim();
-  const email = $("#signupEmail").value.trim();
+  const username = normalizeUsername($("#signupUsername").value);
   const password = $("#signupPassword").value;
+
+  if (!/^[a-z0-9_.\-]{3,20}$/.test(username)) {
+    showAuthError({ code: "custom/invalid-username" });
+    return;
+  }
+
   try {
+    // اتأكد إن اسم المستخدم مش مكرر
+    const takenSnap = await get(ref(db, "usernames/" + username));
+    if (takenSnap.exists()) { showAuthError({ code: "custom/username-taken" }); return; }
+
     // أول مستخدم في النظام يبقى أدمن تلقائيًا (تهيئة أول مرة)، وبعد كده أي حساب جديد يفضل معلّق لحد ما الأدمن يفعّله
     const usersSnap = await get(ref(db, "users"));
     const isFirstUser = !usersSnap.exists();
 
+    const email = usernameToEmail(username);
     const cred = await createUserWithEmailAndPassword(auth, email, password);
     await updateProfile(cred.user, { displayName: name });
 
     const role = isFirstUser ? "admin" : null;
     await set(ref(db, "users/" + cred.user.uid), {
-      name, email,
+      name, username, email,
       role,
       permissions: defaultPermissions(role),
       createdAt: Date.now(),
     });
+    await set(ref(db, "usernames/" + username), { uid: cred.user.uid, email });
 
     if (isFirstUser) toast("تم إنشاء أول حساب في النظام كمدير للنظام");
     else toast("تم إنشاء الحساب، في انتظار تفعيل الأدمن للدور");
