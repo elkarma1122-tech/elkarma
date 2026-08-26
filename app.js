@@ -162,13 +162,58 @@ $$(".auth-tab").forEach(tab => {
   tab.addEventListener("click", () => {
     $$(".auth-tab").forEach(t => t.classList.remove("active"));
     tab.classList.add("active");
-    const isLogin = tab.dataset.authtab === "login";
-    $("#loginForm").classList.toggle("hidden", !isLogin);
-    $("#signupForm").classList.toggle("hidden", isLogin);
-    $("#authError").classList.add("hidden");
-  });
-});
+  // ==========================================
+// كود تسجيل الدخول المعالج والمغلق بشكل صحيح
+// ==========================================
+const loginForm = document.getElementById("loginForm");
 
+if (loginForm) {
+  loginForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    
+    try {
+      const usernameInput = document.getElementById("username") ? document.getElementById("username").value.trim() : "";
+      const passwordInput = document.getElementById("password") ? document.getElementById("password").value : "";
+
+      if (!usernameInput || !passwordInput) {
+        alert("يرجى إدخال اسم المستخدم وكلمة المرور");
+        return;
+      }
+
+      // البحث عن الـ UID الخاص باسم المستخدم من قاعدة البيانات
+      const userRef = ref(db, "usernames/" + usernameInput);
+      const snapshot = await get(userRef);
+
+      if (!snapshot.exists()) {
+        alert("اسم المستخدم غير موجود!");
+        return;
+      }
+
+      const uid = snapshot.val();
+
+      // جلب بيانات البريد الإلكتروني للمستخدم
+      const userDataRef = ref(db, "users/" + uid);
+      const userSnap = await get(userDataRef);
+
+      if (!userSnap.exists()) {
+        alert("بيانات المستخدم غير مكتملة!");
+        return;
+      }
+
+      const userEmail = userSnap.val().email;
+
+      // تسجيل الدخول باستخدام البريد الإلكتروني وكلمة المرور
+      await signInWithEmailAndPassword(auth, userEmail, passwordInput);
+      
+      console.log("تم تسجيل الدخول بنجاح!");
+      window.location.href = "dashboard.html"; // أو الصفحة الرئيسية لديك
+
+    } catch (error) {
+      console.error("Auth/DB error:", error);
+      alert("حدث خطأ أثناء تسجيل الدخول: " + error.message);
+    }
+  }); // 👈 هذا هو القوس الذي كان مفقوداً ويتسبب في خطأ الـ SyntaxError
+}
 function showAuthError(err) {
   const box = $("#authError");
   box.textContent = translateAuthError(err);
