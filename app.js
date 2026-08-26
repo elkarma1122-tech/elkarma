@@ -162,58 +162,13 @@ $$(".auth-tab").forEach(tab => {
   tab.addEventListener("click", () => {
     $$(".auth-tab").forEach(t => t.classList.remove("active"));
     tab.classList.add("active");
-  // ==========================================
-// كود تسجيل الدخول المعالج والمغلق بشكل صحيح
-// ==========================================
-const loginForm = document.getElementById("loginForm");
+    const isLogin = tab.dataset.authtab === "login";
+    $("#loginForm").classList.toggle("hidden", !isLogin);
+    $("#signupForm").classList.toggle("hidden", isLogin);
+    $("#authError").classList.add("hidden");
+  });
+});
 
-if (loginForm) {
-  loginForm.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    
-    try {
-      const usernameInput = document.getElementById("username") ? document.getElementById("username").value.trim() : "";
-      const passwordInput = document.getElementById("password") ? document.getElementById("password").value : "";
-
-      if (!usernameInput || !passwordInput) {
-        alert("يرجى إدخال اسم المستخدم وكلمة المرور");
-        return;
-      }
-
-      // البحث عن الـ UID الخاص باسم المستخدم من قاعدة البيانات
-      const userRef = ref(db, "usernames/" + usernameInput);
-      const snapshot = await get(userRef);
-
-      if (!snapshot.exists()) {
-        alert("اسم المستخدم غير موجود!");
-        return;
-      }
-
-      const uid = snapshot.val();
-
-      // جلب بيانات البريد الإلكتروني للمستخدم
-      const userDataRef = ref(db, "users/" + uid);
-      const userSnap = await get(userDataRef);
-
-      if (!userSnap.exists()) {
-        alert("بيانات المستخدم غير مكتملة!");
-        return;
-      }
-
-      const userEmail = userSnap.val().email;
-
-      // تسجيل الدخول باستخدام البريد الإلكتروني وكلمة المرور
-      await signInWithEmailAndPassword(auth, userEmail, passwordInput);
-      
-      console.log("تم تسجيل الدخول بنجاح!");
-      window.location.href = "dashboard.html"; // أو الصفحة الرئيسية لديك
-
-    } catch (error) {
-      console.error("Auth/DB error:", error);
-      alert("حدث خطأ أثناء تسجيل الدخول: " + error.message);
-    }
-  }); // 👈 هذا هو القوس الذي كان مفقوداً ويتسبب في خطأ الـ SyntaxError
-}
 function showAuthError(err) {
   const box = $("#authError");
   box.textContent = translateAuthError(err);
@@ -231,7 +186,10 @@ function translateAuthError(err) {
     "auth/operation-not-allowed": "تسجيل الدخول بالإيميل/الباسورد غير مفعّل في Firebase Authentication",
     "custom/username-not-found": "لا يوجد حساب بهذا الاسم",
     "custom/username-taken": "اسم المستخدم ده محجوز، جرّب اسم تاني",
-    "custom/invalid-username": "اسم المستخدم لازم يكون 3-20 حرف إنجليزي أو رقم (يسمح بـ _ و .)",
+    "custom/invalid-username": "اسم المستخدم لازم يكون 3-20 حرف إنجليزي أو رقم (يسمح بـ _ و - فقط، من غير نقطة أو مسافات أو حروف عربية)",
+    "auth/too-many-requests": "محاولات كتير غلط. استنى شوية وحاول تاني",
+    "auth/user-disabled": "الحساب ده متوقف. كلّم الأدمن",
+    "auth/network-request-failed": "فيه مشكلة في الاتصال بالإنترنت. اتأكد من الاتصال وحاول تاني",
   };
   console.error("Auth/DB error:", err);
   if (map[code]) return map[code];
@@ -248,18 +206,17 @@ function normalizeUsername(u) { return (u || "").trim().toLowerCase(); }
 $("#loginForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const username = normalizeUsername($("#loginUsername").value);
+  if (!/^[a-z0-9_\-]{1,20}$/.test(username)) {
+    showAuthError({ code: "custom/username-not-found" });
+    return;
+  }
   try {
-// استخراج القيمة وتنظيفها
-let inputVal = document.getElementById("الإيد_بتاع_الخانة").value.trim();
-
-// لو المدخل إيميل (فيه علامة @)، حوّله للشكل المسموح أو استدعي الدخول المباشر
-if (inputVal.includes("@")) {
-    // حل مشكلة الرموز غير المسموحة في مسارات Firebase
-    inputVal = inputVal.replace(/[.#$\[\]]/g, "_"); 
-}
-
-// استكمال البحث في الفايربيز بأمان
-const userRef = ref(db, "usernames/" + inputVal);
+    const snap = await get(ref(db, "usernames/" + username));
+    if (!snap.exists()) { showAuthError({ code: "custom/username-not-found" }); return; }
+    const email = snap.val().email;
+    await signInWithEmailAndPassword(auth, email, $("#loginPassword").value);
+  } catch (err) { showAuthError(err); }
+});
 
 $("#signupForm").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -267,7 +224,7 @@ $("#signupForm").addEventListener("submit", async (e) => {
   const username = normalizeUsername($("#signupUsername").value);
   const password = $("#signupPassword").value;
 
-  if (!/^[a-z0-9_.\-]{3,20}$/.test(username)) {
+  if (!/^[a-z0-9_\-]{3,20}$/.test(username)) {
     showAuthError({ code: "custom/invalid-username" });
     return;
   }
@@ -1149,14 +1106,13 @@ function userRow(u) {
 }
 
 function openUserPermForm(uid) {
-  const u = state.users?.[uid];
-  if (!u) return;
-
-  const permsHtml = (typeof PERMISSIONS !== "undefined" ? PERMISSIONS : []).map(p => `
+  const u = state.users[uid];
+  const permsHtml = PERMISSIONS.map(p => `
     <div class="perm-item">
       <input type="checkbox" id="perm_${p.key}" data-key="${p.key}" ${u.permissions?.[p.key] ? "checked" : ""}>
       <label for="perm_${p.key}">${p.label}</label>
     </div>`).join("");
+
   openModal(`
     <div class="modal-head"><h3>${esc(u.name)} — الدور والصلاحيات</h3><button class="modal-close" id="mClose">✕</button></div>
     <div class="field">
@@ -1179,22 +1135,12 @@ function openUserPermForm(uid) {
       <button class="btn btn-ghost" id="mCancel">إلغاء</button>
     </div>
   `);
-  document.getElementById("mClose").onclick = closeModal;
-  document.getElementById("userPermForm").onsubmit = async (e) => {
-    e.preventDefault();
-    const role = document.getElementById("userRole").value;
-    const permissions = {};
-    PERMISSIONS.forEach(p => {
-      permissions[p.key] = document.getElementById(`perm_${p.key}`)?.checked || false;
-    });
+  $("#mClose").onclick = $("#mCancel").onclick = closeModal;
 
-    const ok = await runAsync(async () => {
-      await update(ref(db, "users/" + uid), { role, permissions });
-    }, { successMsg: "تم تحديث صلاحيات المستخدم بنجاح" });
-
-    if (ok) closeModal();
-  };
-}
+  $("#userRole").addEventListener("change", (e) => {
+    const defs = defaultPermissions(e.target.value || null);
+    PERMISSIONS.forEach(p => { $("#perm_" + p.key).checked = !!defs[p.key]; });
+  });
 
   $("#saveUserBtn").onclick = async () => {
     const role = $("#userRole").value || null;
@@ -1205,14 +1151,6 @@ function openUserPermForm(uid) {
       if (!otherAdmins) { toast("لازم يفضل أدمن واحد على الأقل في النظام"); return; }
     }
     const ok = await safeRun(update(ref(db, "users/" + uid), { role, permissions }), { successMsg: "تم تحديث بيانات المستخدم" });
-  // مثال على كود غير مغلق يتسبب في نفس الخطأ:
-document.getElementById("loginForm").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    // ... أسطر الكود
-// =========================================
-// إغلاق أي أقواس أو دالات مفتوحة في أعلى الملف
-// =========================================
+    if (ok) closeModal();
+  };
 }
-}
-});
-})();
