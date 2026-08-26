@@ -1,5 +1,4 @@
-import { auth, db } from "./firebase-config.js";
-import {
+import { db } from "./firebase-config.js";import {
   createUserWithEmailAndPassword, signInWithEmailAndPassword,
   onAuthStateChanged, signOut, updateProfile
 } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
