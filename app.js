@@ -143,11 +143,15 @@ function translateAuthError(err) {
     "auth/invalid-credential": "بيانات الدخول غير صحيحة",
     "auth/email-already-in-use": "البريد الإلكتروني مُستخدم بالفعل",
     "auth/weak-password": "كلمة المرور ضعيفة (6 أحرف على الأقل)",
+    "auth/operation-not-allowed": "تسجيل الدخول بالإيميل/الباسورد غير مفعّل في Firebase Authentication",
     "custom/username-not-found": "لا يوجد حساب بهذا الاسم",
     "custom/username-taken": "اسم المستخدم ده محجوز، جرّب اسم تاني",
     "custom/invalid-username": "اسم المستخدم لازم يكون 3-20 حرف إنجليزي أو رقم (يسمح بـ _ و .)",
   };
-  return map[code] || "حصل خطأ، حاول تاني";
+  console.error("Auth/DB error:", err);
+  if (map[code]) return map[code];
+  // نعرض الخطأ الخام كمان عشان نقدر نشخّصه من غير ما نحتاج الـ Console
+  return `حصل خطأ: ${code || err?.message || err}`;
 }
 
 // فايربيز أوث بيشتغل بالإيميل، فبنبني إيميل داخلي (وهمي) من اسم المستخدم
@@ -183,13 +187,14 @@ $("#signupForm").addEventListener("submit", async (e) => {
     const takenSnap = await get(ref(db, "usernames/" + username));
     if (takenSnap.exists()) { showAuthError({ code: "custom/username-taken" }); return; }
 
-    // أول مستخدم في النظام يبقى أدمن تلقائيًا (تهيئة أول مرة)، وبعد كده أي حساب جديد يفضل معلّق لحد ما الأدمن يفعّله
-    const usersSnap = await get(ref(db, "users"));
-    const isFirstUser = !usersSnap.exists();
-
     const email = usernameToEmail(username);
     const cred = await createUserWithEmailAndPassword(auth, email, password);
     await updateProfile(cred.user, { displayName: name });
+
+    // مهم: بنتحقق هل ده أول مستخدم في النظام بعد إنشاء حساب الأوث (وبعد ما بقى مسجل دخول)
+    // لأن قراءة "users" محتاجة auth != null، ومش ممكن نتحقق منها قبل ما يبقى فيه مستخدم مسجل دخول
+    const usersSnap = await get(ref(db, "users"));
+    const isFirstUser = !usersSnap.exists();
 
     const role = isFirstUser ? "admin" : null;
     await set(ref(db, "users/" + cred.user.uid), {
