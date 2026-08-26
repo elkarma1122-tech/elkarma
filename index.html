@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>نظام إدارة حضانة وتخاطب</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@600;700;800;900&family=Tajawal:wght@400;500;700;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ============== شاشة الدخول / التسجيل ============== -->
+<div id="authScreen" class="auth-wrap">
+  <div class="auth-card">
+    <div class="auth-brand">
+      <div class="logo-dot">ن</div>
+      <div>
+        <h1>نظام إدارة الحضانة</h1>
+      </div>
+    </div>
+    <p class="auth-sub">متابعة الأطفال، تخصصات التخاطب، الخطط والتقارير — في مكان واحد ومتزامن لحظيًا</p>
+
+    <div class="auth-tabs">
+      <button class="auth-tab active" data-authtab="login">تسجيل الدخول</button>
+      <button class="auth-tab" data-authtab="signup">حساب جديد</button>
+    </div>
+
+    <div id="authError" class="error-box hidden"></div>
+    <div id="authInfo" class="info-box hidden"></div>
+
+    <!-- دخول -->
+    <form id="loginForm">
+      <div class="field">
+        <label>البريد الإلكتروني</label>
+        <input type="email" id="loginEmail" required placeholder="name@nursery.com">
+      </div>
+      <div class="field">
+        <label>كلمة المرور</label>
+        <input type="password" id="loginPassword" required placeholder="••••••••">
+      </div>
+      <button type="submit" class="btn btn-primary btn-full">دخول</button>
+    </form>
+
+    <!-- تسجيل جديد -->
+    <form id="signupForm" class="hidden">
+      <div class="field">
+        <label>الاسم بالكامل</label>
+        <input type="text" id="signupName" required placeholder="مثال: مروة أحمد">
+      </div>
+      <div class="field">
+        <label>البريد الإلكتروني</label>
+        <input type="email" id="signupEmail" required>
+      </div>
+      <div class="field">
+        <label>كلمة المرور</label>
+        <input type="password" id="signupPassword" required minlength="6" placeholder="6 أحرف على الأقل">
+      </div>
+      <button type="submit" class="btn btn-primary btn-full">إنشاء الحساب</button>
+      <p class="hint">هيتم تسجيل حسابك بصلاحيات محدودة لحد ما الأدمن يفعّل دورك (مدير / مشرف / أخصائي تخاطب).</p>
+    </form>
+  </div>
+</div>
+
+<!-- ============== واجهة التطبيق ============== -->
+<div id="appScreen" class="app-shell hidden">
+  <main class="main">
+    <div class="topbar">
+      <div>
+        <h2 id="pageTitle">لوحة التحكم</h2>
+        <div class="sub" id="pageSub">نظرة عامة على الحضانة اليوم</div>
+      </div>
+      <div class="userchip">
+        <div>
+          <div style="font-weight:800;font-size:13px" id="topUserName">—</div>
+          <div style="font-size:11px;color:var(--muted)" id="topUserRole">—</div>
+        </div>
+        <div class="avatar" id="topUserAvatar">؟</div>
+        <button class="btn btn-ghost btn-sm" id="logoutBtn">خروج</button>
+      </div>
+    </div>
+
+    <div id="viewRoot"></div>
+  </main>
+
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="logo-dot">ن</div>
+      <div>
+        <h1>حضانتي</h1>
+        <small>تخاطب • نمو • متابعة</small>
+      </div>
+    </div>
+
+    <button class="nav-item active" data-nav="dashboard"><span class="ic">◆</span> لوحة التحكم</button>
+    <button class="nav-item" data-nav="children"><span class="ic">◆</span> الأطفال</button>
+    <button class="nav-item" data-nav="reports"><span class="ic">◆</span> التقارير</button>
+    <button class="nav-item hidden" data-nav="users" id="navUsers"><span class="ic">◆</span> المستخدمون والصلاحيات</button>
+
+    <div class="sidebar-footer">
+      <div style="font-size:11px;color:rgba(255,255,255,.6)">الدور الحالي</div>
+      <span class="role-chip" id="sideRoleChip">—</span>
+    </div>
+  </aside>
+</div>
+
+<div id="toastRoot"></div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
