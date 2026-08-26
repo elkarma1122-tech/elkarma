@@ -1149,6 +1149,10 @@ function openUserPermForm(uid) {
       if (!otherAdmins) { toast("لازم يفضل أدمن واحد على الأقل في النظام"); return; }
     }
     const ok = await safeRun(update(ref(db, "users/" + uid), { role, permissions }), { successMsg: "تم تحديث بيانات المستخدم" });
-    if (ok) closeModal();
-  };
-}
+  // مثال على كود غير مغلق يتسبب في نفس الخطأ:
+document.getElementById("loginForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    // ... أسطر الكود
+
+// ❌ الخطأ: عدم إضافة إغلاق الدالة في النهاية:
+// });
