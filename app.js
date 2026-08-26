@@ -1155,4 +1155,6 @@ document.getElementById("loginForm").addEventListener("submit", async (e) => {
     // ... أسطر الكود
 
 // ❌ الخطأ: عدم إضافة إغلاق الدالة في النهاية:
-// });
+});
+}
+}
