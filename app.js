@@ -1,4 +1,5 @@
-import { db } from "./firebase-config.js";import {
+import { auth, db } from "./firebase-config.js";
+import {
   createUserWithEmailAndPassword, signInWithEmailAndPassword,
   onAuthStateChanged, signOut, updateProfile
 } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
@@ -206,9 +207,16 @@ $("#signupForm").addEventListener("submit", async (e) => {
 
 $("#logoutBtn").addEventListener("click", () => signOut(auth));
 
-$("#logoutBtn").addEventListener("click", () => {
-  localStorage.removeItem("loggedInUser");
-  location.reload();
+onAuthStateChanged(auth, (user) => {
+  if (user) {
+    state.authUid = user.uid;
+    listenAll();
+  } else {
+    state.authUid = null;
+    state.me = null;
+    $("#authScreen").classList.remove("hidden");
+    $("#appScreen").classList.add("hidden");
+  }
 });
 
 /* =========================================================
