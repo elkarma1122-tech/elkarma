@@ -1149,15 +1149,14 @@ function userRow(u) {
 }
 
 function openUserPermForm(uid) {
-  const u = state.users[uid];
+  const u = state.users?.[uid];
   if (!u) return;
 
-  const permsHtml = PERMISSIONS.map(p => `
+  const permsHtml = (typeof PERMISSIONS !== "undefined" ? PERMISSIONS : []).map(p => `
     <div class="perm-item">
       <input type="checkbox" id="perm_${p.key}" data-key="${p.key}" ${u.permissions?.[p.key] ? "checked" : ""}>
       <label for="perm_${p.key}">${p.label}</label>
     </div>`).join("");
-
   openModal(`
     <div class="modal-head"><h3>${esc(u.name)} — الدور والصلاحيات</h3><button class="modal-close" id="mClose">✕</button></div>
     <div class="field">
