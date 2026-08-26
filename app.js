@@ -204,12 +204,17 @@ $("#loginForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const username = normalizeUsername($("#loginUsername").value);
   try {
-    const snap = await get(ref(db, "usernames/" + username));
-    if (!snap.exists()) { showAuthError({ code: "custom/username-not-found" }); return; }
-    const email = snap.val().email;
-    await signInWithEmailAndPassword(auth, email, $("#loginPassword").value);
-  } catch (err) { showAuthError(err); }
-});
+// استخراج القيمة وتنظيفها
+let inputVal = document.getElementById("الإيد_بتاع_الخانة").value.trim();
+
+// لو المدخل إيميل (فيه علامة @)، حوّله للشكل المسموح أو استدعي الدخول المباشر
+if (inputVal.includes("@")) {
+    // حل مشكلة الرموز غير المسموحة في مسارات Firebase
+    inputVal = inputVal.replace(/[.#$\[\]]/g, "_"); 
+}
+
+// استكمال البحث في الفايربيز بأمان
+const userRef = ref(db, "usernames/" + inputVal);
 
 $("#signupForm").addEventListener("submit", async (e) => {
   e.preventDefault();
