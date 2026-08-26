@@ -206,16 +206,9 @@ $("#signupForm").addEventListener("submit", async (e) => {
 
 $("#logoutBtn").addEventListener("click", () => signOut(auth));
 
-onAuthStateChanged(auth, (user) => {
-  if (user) {
-    state.authUid = user.uid;
-    listenAll();
-  } else {
-    state.authUid = null;
-    state.me = null;
-    $("#authScreen").classList.remove("hidden");
-    $("#appScreen").classList.add("hidden");
-  }
+$("#logoutBtn").addEventListener("click", () => {
+  localStorage.removeItem("loggedInUser");
+  location.reload();
 });
 
 /* =========================================================
