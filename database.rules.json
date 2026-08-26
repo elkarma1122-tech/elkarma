@@ -3,6 +3,14 @@
     ".read": false,
     ".write": false,
 
+    "usernames": {
+      ".read": true,
+      "$username": {
+        ".write": "auth != null && (!data.exists() || data.child('uid').val() === auth.uid)",
+        ".validate": "newData.hasChildren(['uid','email']) && newData.child('uid').val() === auth.uid"
+      }
+    },
+
     "users": {
       ".read": "auth != null",
       "$uid": {
