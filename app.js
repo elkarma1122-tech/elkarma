@@ -22,6 +22,8 @@ const PERMISSIONS = [
   { key: "manage_users", label: "إدارة المستخدمين والصلاحيات" },
   { key: "manage_children", label: "إضافة وتعديل بيانات الأطفال" },
   { key: "manage_assignments", label: "تعيين المتابعين (الفريق) للأطفال" },
+  { key: "manage_attendance", label: "تسجيل الحضور والانصراف اليومي" },
+  { key: "manage_daily_log", label: "تسجيل يوميات الطفل (نوم، أكل، حالة)" },
   { key: "manage_progress", label: "تسجيل مراحل التقدم" },
   { key: "manage_plans", label: "إدارة الخطط العلاجية" },
   { key: "manage_reports", label: "إنشاء وتعديل التقارير" },
@@ -31,9 +33,9 @@ const PERMISSIONS = [
 function defaultPermissions(role) {
   const all = Object.fromEntries(PERMISSIONS.map(p => [p.key, false]));
   if (role === "admin") { Object.keys(all).forEach(k => all[k] = true); return all; }
-  if (role === "manager") return { ...all, manage_children: true, manage_assignments: true, manage_progress: true, manage_plans: true, manage_reports: true, view_reports: true };
-  if (role === "supervisor") return { ...all, manage_progress: true, manage_plans: true, manage_reports: true, view_reports: true };
-  if (role === "therapist") return { ...all, manage_progress: true, manage_reports: true, view_reports: true };
+  if (role === "manager") return { ...all, manage_children: true, manage_assignments: true, manage_attendance: true, manage_daily_log: true, manage_progress: true, manage_plans: true, manage_reports: true, view_reports: true };
+  if (role === "supervisor") return { ...all, manage_attendance: true, manage_daily_log: true, manage_progress: true, manage_plans: true, manage_reports: true, view_reports: true };
+  if (role === "therapist") return { ...all, manage_daily_log: true, manage_progress: true, manage_reports: true, view_reports: true };
   return all; // pending / no role
 }
 
@@ -52,13 +54,16 @@ const state = {
   users: {},
   children: {},
   assignments: {},
+  attendance: {},
+  dailyLogs: {},
   milestones: {},
   plans: {},
   reports: {},
   view: "dashboard",
+  attendanceDate: new Date().toISOString().slice(0, 10),
   childId: null,
   childTab: "info",
-  loaded: { users: false, children: false, assignments: false, milestones: false, plans: false, reports: false },
+  loaded: { users: false, children: false, assignments: false, attendance: false, dailyLogs: false, milestones: false, plans: false, reports: false },
 };
 
 /* =========================================================
@@ -75,6 +80,41 @@ function toast(msg) {
   $("#toastRoot").appendChild(el);
   setTimeout(() => el.remove(), 2600);
 }
+
+// رسالة عربية مفهومة لأي خطأ يحصل أثناء الكتابة/القراءة في القاعدة،
+// بدل ما العملية تفشل بصمت (المودال يفضل فاتح والزرار يبان "مش بيعمل حاجة")
+function translateDbError(err) {
+  const code = (err && (err.code || err.message)) ? String(err.code || err.message).toUpperCase() : "";
+  if (code.includes("PERMISSION_DENIED")) {
+    return "معنديش صلاحية كافية لتنفيذ العملية دي. لو المفروض يكون عندك صلاحية، كلّم الأدمن يتأكد من دورك وصلاحياتك من شاشة (المستخدمون والصلاحيات).";
+  }
+  if (code.includes("NETWORK") || code.includes("FAILED-FETCH") || code.includes("UNAVAILABLE")) {
+    return "فيه مشكلة في الاتصال بالإنترنت. اتأكد من الاتصال وحاول تاني.";
+  }
+  console.error("DB error:", err);
+  return "حصل خطأ أثناء تنفيذ العملية: " + (err?.message || err);
+}
+
+// نفّذ عملية غير متزامنة (كتابة في القاعدة غالبًا) ولو فشلت اعرض توست بدل الفشل الصامت
+async function safeRun(promise, { successMsg, onSuccess } = {}) {
+  try {
+    await promise;
+    if (successMsg) toast(successMsg);
+    if (onSuccess) onSuccess();
+    return true;
+  } catch (err) {
+    toast(translateDbError(err));
+    return false;
+  }
+}
+
+// شبكة أمان: أي وعد (Promise) يترفض من غير ما حد يمسكه، نوريه للمستخدم
+// بدل ما يختفي بصمت ويبان إن "الزرار مش بيعمل حاجة"
+window.addEventListener("unhandledrejection", (e) => {
+  console.error("Unhandled promise rejection:", e.reason);
+  toast(translateDbError(e.reason));
+  e.preventDefault();
+});
 
 function fmtDate(d) {
   if (!d) return "—";
@@ -238,6 +278,8 @@ function listenAll() {
   });
   onValue(ref(db, "children"), (snap) => { state.children = snap.val() || {}; state.loaded.children = true; renderCurrentView(); });
   onValue(ref(db, "assignments"), (snap) => { state.assignments = snap.val() || {}; state.loaded.assignments = true; renderCurrentView(); });
+  onValue(ref(db, "attendance"), (snap) => { state.attendance = snap.val() || {}; state.loaded.attendance = true; renderCurrentView(); });
+  onValue(ref(db, "dailyLogs"), (snap) => { state.dailyLogs = snap.val() || {}; state.loaded.dailyLogs = true; renderCurrentView(); });
   onValue(ref(db, "milestones"), (snap) => { state.milestones = snap.val() || {}; state.loaded.milestones = true; renderCurrentView(); });
   onValue(ref(db, "plans"), (snap) => { state.plans = snap.val() || {}; state.loaded.plans = true; renderCurrentView(); });
   onValue(ref(db, "reports"), (snap) => { state.reports = snap.val() || {}; state.loaded.reports = true; renderCurrentView(); });
@@ -281,6 +323,7 @@ function renderCurrentView() {
   const titles = {
     dashboard: ["لوحة التحكم", "نظرة عامة على الحضانة اليوم"],
     children: ["الأطفال", "بيانات الأطفال ومتابعتهم"],
+    attendance: ["الحضور والانصراف", "تسجيل حضور وانصراف الأطفال يوميًا"],
     reports: ["التقارير", "كل التقارير المسجّلة على مستوى الحضانة"],
     users: ["المستخدمون والصلاحيات", "إدارة الأدوار وتحديد الصلاحيات"],
     childDetail: ["ملف الطفل", ""],
@@ -291,6 +334,7 @@ function renderCurrentView() {
 
   if (state.view === "dashboard") return renderDashboard();
   if (state.view === "children") return renderChildrenList();
+  if (state.view === "attendance") return renderAttendance();
   if (state.view === "reports") return renderGlobalReports();
   if (state.view === "users") return can(state.me, "manage_users") ? renderUsers() : renderNoAccess();
   if (state.view === "childDetail") return renderChildDetail();
@@ -316,9 +360,14 @@ function renderPending() {
    ========================================================= */
 function renderDashboard() {
   const childrenList = objToList(state.children);
+  const activeChildren = childrenList.filter(c => c.status !== "paused");
   const usersList = objToList(state.users);
   const reportsList = objToList(state.reports);
   const activeAssignments = objToList(state.assignments).filter(a => !a.to);
+
+  const today = new Date().toISOString().slice(0, 10);
+  const todayAttendance = latestAttendanceByChild(today);
+  const presentToday = Object.values(todayAttendance).filter(a => a.status === "present" || a.status === "late").length;
 
   const recentReports = reportsList.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).slice(0, 5);
 
@@ -326,7 +375,7 @@ function renderDashboard() {
     <div class="grid grid-4">
       ${statCard("👶", childrenList.length, "عدد الأطفال المسجّلين", "teal")}
       ${statCard("🧑‍⚕️", usersList.filter(u => u.role === "therapist").length, "أخصائيو تخاطب", "plum")}
-      ${statCard("🔗", activeAssignments.length, "متابعات نشطة حاليًا", "apricot")}
+      ${statCard("🗓️", `${presentToday}/${activeChildren.length}`, "حضور اليوم", "apricot")}
       ${statCard("📄", reportsList.length, "إجمالي التقارير", "rose")}
     </div>
 
@@ -440,15 +489,13 @@ function openChildForm(id) {
       notes: $("#cf_notes").value.trim(),
       status: $("#cf_status").value,
     };
-    try {
-      if (id) { await update(ref(db, "children/" + id), data); toast("تم تحديث بيانات الطفل"); }
-      else {
-        data.createdAt = Date.now(); data.createdBy = state.authUid;
-        await push(ref(db, "children"), data);
-        toast("تمت إضافة الطفل");
-      }
-      closeModal();
-    } catch (err) { toast("حصل خطأ أثناء الحفظ"); console.error(err); }
+    let ok;
+    if (id) { ok = await safeRun(update(ref(db, "children/" + id), data), { successMsg: "تم تحديث بيانات الطفل" }); }
+    else {
+      data.createdAt = Date.now(); data.createdBy = state.authUid;
+      ok = await safeRun(push(ref(db, "children"), data), { successMsg: "تمت إضافة الطفل" });
+    }
+    if (ok) closeModal();
   });
 }
 
@@ -466,15 +513,122 @@ function confirmDeleteChild(id) {
   $("#confirmDel").onclick = async () => {
     const updates = { ["children/" + id]: null };
     objToList(state.assignments).filter(a => a.childId === id).forEach(a => updates["assignments/" + a.id] = null);
+    objToList(state.attendance).filter(a => a.childId === id).forEach(a => updates["attendance/" + a.id] = null);
+    objToList(state.dailyLogs).filter(l => l.childId === id).forEach(l => updates["dailyLogs/" + l.id] = null);
     objToList(state.milestones).filter(m => m.childId === id).forEach(m => updates["milestones/" + m.id] = null);
     objToList(state.plans).filter(p => p.childId === id).forEach(p => updates["plans/" + p.id] = null);
     objToList(state.reports).filter(r => r.childId === id).forEach(r => updates["reports/" + r.id] = null);
-    await update(ref(db), updates);
-    toast("تم حذف الطفل وكل بياناته");
+    const ok = await safeRun(update(ref(db), updates), { successMsg: "تم حذف الطفل وكل بياناته" });
+    if (!ok) return;
     closeModal();
     if (state.view === "childDetail" && state.childId === id) { state.view = "children"; }
     renderCurrentView();
   };
+}
+
+/* =========================================================
+   الحضور والانصراف اليومي
+   ========================================================= */
+const ATT_STATUS = {
+  present: ["حاضر", "badge-teal"],
+  late: ["متأخر", "badge-apricot"],
+  absent: ["غائب", "badge-rose"],
+};
+
+// بياخد كل سجلات الحضور وير جع لكل طفل آخر سجل بتاريخ معيّن (لو سُجّل أكتر من مرة في نفس اليوم)
+function latestAttendanceByChild(date) {
+  const list = objToList(state.attendance).filter(a => a.date === date);
+  const byChild = {};
+  list.forEach(a => {
+    const prev = byChild[a.childId];
+    if (!prev || (a.recordedAt || 0) > (prev.recordedAt || 0)) byChild[a.childId] = a;
+  });
+  return byChild;
+}
+
+function renderAttendance() {
+  const canManage = can(state.me, "manage_attendance");
+  const date = state.attendanceDate || new Date().toISOString().slice(0, 10);
+  const childrenList = objToList(state.children).filter(c => c.status !== "paused")
+    .sort((a, b) => (a.name || "").localeCompare(b.name || "", "ar"));
+  const byChild = latestAttendanceByChild(date);
+
+  viewRoot().innerHTML = `
+    <div class="card" style="margin-bottom:16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <div class="field" style="margin:0"><label>التاريخ</label><input type="date" id="attDate" value="${date}"></div>
+      <div class="hint" style="margin-top:18px">${childrenList.length} طفل نشط · ${Object.values(byChild).filter(a => a.status === "present" || a.status === "late").length} حاضر النهاردة</div>
+    </div>
+    <div class="list-card">
+      ${childrenList.length ? childrenList.map(c => attendanceRow(c, byChild[c.id], canManage)).join("") : emptyRow("لسه مفيش أطفال نشطين مسجّلين")}
+    </div>
+  `;
+
+  $("#attDate").addEventListener("change", (e) => { state.attendanceDate = e.target.value; renderAttendance(); });
+
+  $$(".js-att-mark").forEach(btn => btn.addEventListener("click", async () => {
+    const childId = btn.dataset.id, status = btn.dataset.status;
+    const now = new Date();
+    const data = {
+      childId, date, status,
+      checkIn: status === "absent" ? null : now.toTimeString().slice(0, 5),
+      recordedBy: state.authUid, recordedAt: Date.now(),
+    };
+    await safeRun(push(ref(db, "attendance"), data), { successMsg: "تم تسجيل " + ATT_STATUS[status][0] });
+  }));
+
+  $$(".js-att-detail").forEach(btn => btn.addEventListener("click", () => openAttendanceDetail(btn.dataset.id, date, byChild[btn.dataset.id])));
+}
+
+function attendanceRow(c, rec, canManage) {
+  const st = rec ? ATT_STATUS[rec.status] : null;
+  return `
+  <div class="row">
+    <div class="row-main">
+      <div class="row-avatar">${initials(c.name)}</div>
+      <div>
+        <div class="row-title">${esc(c.name)}</div>
+        <div class="row-sub">${rec ? (rec.checkIn ? "دخول " + rec.checkIn : "") + (rec.checkOut ? " · انصراف " + rec.checkOut : "") : "لسه متسجلش"}</div>
+      </div>
+    </div>
+    <div class="row-actions">
+      ${st ? `<span class="badge ${st[1]}">${st[0]}</span>` : `<span class="badge badge-gray">غير مسجّل</span>`}
+      ${canManage ? `
+        <button class="btn btn-ghost btn-sm js-att-mark" data-id="${c.id}" data-status="present">حاضر</button>
+        <button class="btn btn-ghost btn-sm js-att-mark" data-id="${c.id}" data-status="late">متأخر</button>
+        <button class="btn btn-ghost btn-sm js-att-mark" data-id="${c.id}" data-status="absent">غائب</button>
+        <button class="btn btn-ghost btn-sm js-att-detail" data-id="${c.id}">تفاصيل</button>
+      ` : ""}
+    </div>
+  </div>`;
+}
+
+function openAttendanceDetail(childId, date, rec) {
+  const c = state.children[childId];
+  openModal(`
+    <div class="modal-head"><h3>حضور ${esc(c?.name)} — ${fmtDate(date)}</h3><button class="modal-close" id="mClose">✕</button></div>
+    <form id="attForm">
+      <div class="grid grid-2">
+        <div class="field"><label>وقت الدخول</label><input type="time" id="at_in" value="${rec?.checkIn || ""}"></div>
+        <div class="field"><label>وقت الانصراف</label><input type="time" id="at_out" value="${rec?.checkOut || ""}"></div>
+      </div>
+      <div class="field"><label>ملاحظات</label><input type="text" id="at_notes" value="${esc(rec?.notes)}" placeholder="مثال: جاء متأخر بسبب المرور"></div>
+      <div class="modal-actions">
+        <button type="submit" class="btn btn-primary">حفظ</button>
+        <button type="button" class="btn btn-ghost" id="mCancel">إلغاء</button>
+      </div>
+    </form>
+  `);
+  $("#mClose").onclick = $("#mCancel").onclick = closeModal;
+  $("#attForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const data = {
+      childId, date, status: rec?.status || "present",
+      checkIn: $("#at_in").value || null, checkOut: $("#at_out").value || null,
+      notes: $("#at_notes").value.trim(), recordedBy: state.authUid, recordedAt: Date.now(),
+    };
+    const ok = await safeRun(rec?.id ? update(ref(db, "attendance/" + rec.id), data) : push(ref(db, "attendance"), data), { successMsg: "تم حفظ بيانات الحضور" });
+    if (ok) closeModal();
+  });
 }
 
 /* =========================================================
@@ -489,6 +643,7 @@ function renderChildDetail() {
   const tabs = [
     ["info", "البيانات"],
     ["followers", "المتابعون"],
+    ["dailylog", "يوميات الطفل"],
     ["progress", "مراحل التقدم"],
     ["plan", "الخطة العلاجية"],
     ["reports", "التقارير"],
@@ -507,6 +662,7 @@ function renderChildDetail() {
   const body = $("#childTabBody");
   if (state.childTab === "info") body.innerHTML = childInfoTab(c);
   if (state.childTab === "followers") return renderFollowersTab(c);
+  if (state.childTab === "dailylog") return renderDailyLogTab(c);
   if (state.childTab === "progress") return renderProgressTab(c);
   if (state.childTab === "plan") return renderPlanTab(c);
   if (state.childTab === "reports") return renderChildReportsTab(c);
@@ -549,12 +705,10 @@ function renderFollowersTab(c) {
   `;
   $("#addFollower")?.addEventListener("click", () => openFollowerForm(c.id));
   $$(".js-end-follow").forEach(b => b.onclick = async () => {
-    await update(ref(db, "assignments/" + b.dataset.id), { to: new Date().toISOString().slice(0, 10) });
-    toast("تم إنهاء متابعة هذا الشخص للطفل");
+    await safeRun(update(ref(db, "assignments/" + b.dataset.id), { to: new Date().toISOString().slice(0, 10) }), { successMsg: "تم إنهاء متابعة هذا الشخص للطفل" });
   });
   $$(".js-del-follow").forEach(b => b.onclick = async () => {
-    await remove(ref(db, "assignments/" + b.dataset.id));
-    toast("تم حذف المتابعة");
+    await safeRun(remove(ref(db, "assignments/" + b.dataset.id)), { successMsg: "تم حذف المتابعة" });
   });
 }
 
@@ -604,13 +758,86 @@ function openFollowerForm(childId) {
     const staffUid = sel.value;
     const staffRole = sel.selectedOptions[0].dataset.role;
     const staffName = state.users[staffUid]?.name || "";
-    await push(ref(db, "assignments"), {
+    const ok = await safeRun(push(ref(db, "assignments"), {
       childId, staffUid, staffName, staffRole,
       from: $("#fl_from").value, to: $("#fl_to").value || null,
       notes: $("#fl_notes").value.trim(), createdAt: Date.now(), createdBy: state.authUid,
-    });
-    toast("تمت إضافة المتابع");
-    closeModal();
+    }), { successMsg: "تمت إضافة المتابع" });
+    if (ok) closeModal();
+  });
+}
+
+/* ---------- يوميات الطفل (نوم، أكل، حالة) ---------- */
+const MOOD_OPTIONS = { happy: "😊 سعيد", normal: "🙂 عادي", cranky: "😣 متضايق", crying: "😢 بيبكي كتير" };
+const MEAL_OPTIONS = { full: "أكل كويس", partial: "أكل جزء بسيط", refused: "رفض الأكل" };
+
+function renderDailyLogTab(c) {
+  const list = objToList(state.dailyLogs).filter(l => l.childId === c.id).sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+  const canManage = can(state.me, "manage_daily_log");
+  $("#childTabBody").innerHTML = `
+    <div style="display:flex;justify-content:flex-end;margin-bottom:14px">
+      ${canManage ? `<button class="btn btn-primary btn-sm" id="addDailyLog">+ يومية جديدة</button>` : ""}
+    </div>
+    <div class="list-card">${list.length ? list.map(l => dailyLogRow(l, canManage)).join("") : emptyRow("لسه مفيش يوميات مسجّلة لهذا الطفل")}</div>
+  `;
+  $("#addDailyLog")?.addEventListener("click", () => openDailyLogForm(c.id));
+  $$(".js-del-dailylog").forEach(b => b.onclick = async () => { await safeRun(remove(ref(db, "dailyLogs/" + b.dataset.id)), { successMsg: "تم الحذف" }); });
+}
+
+function dailyLogRow(l, canManage) {
+  const bits = [];
+  if (l.sleepHours) bits.push(`نوم: ${esc(l.sleepHours)} ساعة`);
+  if (l.meal) bits.push("الأكل: " + (MEAL_OPTIONS[l.meal] || l.meal));
+  if (l.mood) bits.push(MOOD_OPTIONS[l.mood] || l.mood);
+  return `
+  <div class="row">
+    <div class="row-main">
+      <div class="row-avatar">📋</div>
+      <div>
+        <div class="row-title">${fmtDate(l.date)}</div>
+        <div class="row-sub">${bits.join(" · ") || "—"}</div>
+        ${l.notes ? `<div class="pd-notes" style="margin-top:6px">${esc(l.notes)}</div>` : ""}
+      </div>
+    </div>
+    ${canManage ? `<button class="btn btn-danger btn-sm js-del-dailylog" data-id="${l.id}">حذف</button>` : ""}
+  </div>`;
+}
+
+function openDailyLogForm(childId) {
+  openModal(`
+    <div class="modal-head"><h3>يومية جديدة</h3><button class="modal-close" id="mClose">✕</button></div>
+    <form id="dlForm">
+      <div class="field"><label>التاريخ</label><input type="date" id="dl_date" required value="${new Date().toISOString().slice(0, 10)}"></div>
+      <div class="grid grid-2">
+        <div class="field"><label>عدد ساعات النوم</label><input type="number" id="dl_sleep" min="0" max="24" step="0.5" placeholder="مثال: 2"></div>
+        <div class="field"><label>الحالة المزاجية</label>
+          <select id="dl_mood">
+            ${Object.entries(MOOD_OPTIONS).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}
+          </select>
+        </div>
+      </div>
+      <div class="field"><label>الأكل</label>
+        <select id="dl_meal">
+          ${Object.entries(MEAL_OPTIONS).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}
+        </select>
+      </div>
+      <div class="field"><label>ملاحظات (صحية أو سلوكية)</label><textarea id="dl_notes" placeholder="أي ملاحظات تحب تشارك بيها ولي الأمر أو الفريق"></textarea></div>
+      <div class="modal-actions">
+        <button type="submit" class="btn btn-primary">حفظ</button>
+        <button type="button" class="btn btn-ghost" id="mCancel">إلغاء</button>
+      </div>
+    </form>
+  `);
+  $("#mClose").onclick = $("#mCancel").onclick = closeModal;
+  $("#dlForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const data = {
+      childId, date: $("#dl_date").value, sleepHours: $("#dl_sleep").value || null,
+      mood: $("#dl_mood").value, meal: $("#dl_meal").value, notes: $("#dl_notes").value.trim(),
+      recordedBy: state.authUid, recordedAt: Date.now(),
+    };
+    const ok = await safeRun(push(ref(db, "dailyLogs"), data), { successMsg: "تم حفظ يومية الطفل" });
+    if (ok) closeModal();
   });
 }
 
@@ -629,7 +856,7 @@ function renderProgressTab(c) {
     </div>
   `;
   $("#addMilestone")?.addEventListener("click", () => openMilestoneForm(c.id));
-  $$(".js-del-mile").forEach(b => b.onclick = async () => { await remove(ref(db, "milestones/" + b.dataset.id)); toast("تم الحذف"); });
+  $$(".js-del-mile").forEach(b => b.onclick = async () => { await safeRun(remove(ref(db, "milestones/" + b.dataset.id)), { successMsg: "تم الحذف" }); });
 }
 
 function progressItem(m, canManage) {
@@ -668,13 +895,12 @@ function openMilestoneForm(childId) {
   $("#mClose").onclick = $("#mCancel").onclick = closeModal;
   $("#mileForm").addEventListener("submit", async (e) => {
     e.preventDefault();
-    await push(ref(db, "milestones"), {
+    const ok = await safeRun(push(ref(db, "milestones"), {
       childId, stageTitle: $("#ms_title").value.trim(), category: $("#ms_cat").value,
       achievedDate: $("#ms_date").value, description: $("#ms_desc").value.trim(),
       recordedBy: state.authUid, recordedAt: Date.now(),
-    });
-    toast("تم تسجيل مرحلة التقدم");
-    closeModal();
+    }), { successMsg: "تم تسجيل مرحلة التقدم" });
+    if (ok) closeModal();
   });
 }
 
@@ -693,7 +919,7 @@ function renderPlanTab(c) {
   `;
   $("#addPlan")?.addEventListener("click", () => openPlanForm(c.id));
   $$(".js-edit-plan").forEach(b => b.onclick = () => openPlanForm(c.id, b.dataset.id));
-  $$(".js-del-plan").forEach(b => b.onclick = async () => { await remove(ref(db, "plans/" + b.dataset.id)); toast("تم الحذف"); });
+  $$(".js-del-plan").forEach(b => b.onclick = async () => { await safeRun(remove(ref(db, "plans/" + b.dataset.id)), { successMsg: "تم الحذف" }); });
 }
 
 const PLAN_STATUS = { active: ["قيد التنفيذ", "badge-teal"], done: ["منجزة", "badge-plum"], paused: ["متوقفة", "badge-gray"] };
@@ -746,10 +972,10 @@ function openPlanForm(childId, id) {
       targetDate: $("#pl_target").value, status: $("#pl_status").value, goals: $("#pl_goals").value.trim(),
       updatedAt: Date.now(),
     };
-    if (id) await update(ref(db, "plans/" + id), data);
-    else { data.createdBy = state.authUid; data.createdAt = Date.now(); await push(ref(db, "plans"), data); }
-    toast("تم حفظ الخطة");
-    closeModal();
+    let ok;
+    if (id) ok = await safeRun(update(ref(db, "plans/" + id), data), { successMsg: "تم حفظ الخطة" });
+    else { data.createdBy = state.authUid; data.createdAt = Date.now(); ok = await safeRun(push(ref(db, "plans"), data), { successMsg: "تم حفظ الخطة" }); }
+    if (ok) closeModal();
   });
 }
 
@@ -789,8 +1015,7 @@ function bindReportRowClicks(canManage) {
   }));
   $$(".js-del-report").forEach(el => el.addEventListener("click", async (e) => {
     e.stopPropagation();
-    await remove(ref(db, "reports/" + el.dataset.id));
-    toast("تم حذف التقرير");
+    await safeRun(remove(ref(db, "reports/" + el.dataset.id)), { successMsg: "تم حذف التقرير" });
   }));
 }
 function viewReport(id) {
@@ -828,13 +1053,12 @@ function openReportForm(childId) {
   $("#mClose").onclick = $("#mCancel").onclick = closeModal;
   $("#repForm").addEventListener("submit", async (e) => {
     e.preventDefault();
-    await push(ref(db, "reports"), {
+    const ok = await safeRun(push(ref(db, "reports"), {
       childId, title: $("#rp_title").value.trim(), type: $("#rp_type").value,
       date: $("#rp_date").value, content: $("#rp_content").value.trim(),
       createdBy: state.authUid, createdAt: Date.now(),
-    });
-    toast("تم حفظ التقرير");
-    closeModal();
+    }), { successMsg: "تم حفظ التقرير" });
+    if (ok) closeModal();
   });
 }
 
@@ -919,8 +1143,7 @@ function openUserPermForm(uid) {
       const otherAdmins = objToList(state.users).some(x => x.uid !== uid && x.role === "admin");
       if (!otherAdmins) { toast("لازم يفضل أدمن واحد على الأقل في النظام"); return; }
     }
-    await update(ref(db, "users/" + uid), { role, permissions });
-    toast("تم تحديث بيانات المستخدم");
-    closeModal();
+    const ok = await safeRun(update(ref(db, "users/" + uid), { role, permissions }), { successMsg: "تم تحديث بيانات المستخدم" });
+    if (ok) closeModal();
   };
 }
