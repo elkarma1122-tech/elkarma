@@ -1157,4 +1157,4 @@ document.getElementById("loginForm").addEventListener("submit", async (e) => {
 // ❌ الخطأ: عدم إضافة إغلاق الدالة في النهاية:
 });
 }
-}
+
