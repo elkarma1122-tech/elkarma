@@ -1,20 +1,21 @@
-// =====================================================================
-// إعدادات فايربيز — بيانات مشروعك الحقيقية (elkarma-47cfd)
-// =====================================================================
-import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
-import { getAuth } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
-import { getDatabase } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-database.js";
+// Import the functions you need from the SDKs you need
+import { initializeApp } from "firebase/app";
+import { getAnalytics } from "firebase/analytics";
+// TODO: Add SDKs for Firebase products that you want to use
+// https://firebase.google.com/docs/web/setup#available-libraries
 
+// Your web app's Firebase configuration
+// For Firebase JS SDK v7.20.0 and later, measurementId is optional
 const firebaseConfig = {
-  apiKey: "AIzaSyCMCQE7Lc5vD2dFGAbayqhfc_kWSyHa5NU",
-  authDomain: "elkarma-47cfd.firebaseapp.com",
-  databaseURL: "https://elkarma-47cfd-default-rtdb.firebaseio.com", // ⚠️ تأكد من الرابط ده من Console (اقرأ الملاحظة تحت)
-  projectId: "elkarma-47cfd",
-  storageBucket: "elkarma-47cfd.firebasestorage.app",
-  messagingSenderId: "398752188707",
-  appId: "1:398752188707:web:41fb3e46a026a24eb4a496",
+  apiKey: "AIzaSyCs3KLVBY4tPrWhK7gDATX1H0drvjzD2_E",
+  authDomain: "elkarma-1d3d0.firebaseapp.com",
+  projectId: "elkarma-1d3d0",
+  storageBucket: "elkarma-1d3d0.firebasestorage.app",
+  messagingSenderId: "719790503287",
+  appId: "1:719790503287:web:dea5a8f7489b00dead5d72",
+  measurementId: "G-77QDME87VF"
 };
 
-export const app = initializeApp(firebaseConfig);
-export const auth = getAuth(app);
-export const db = getDatabase(app);
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
+const analytics = getAnalytics(app);
