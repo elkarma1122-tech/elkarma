@@ -1,1156 +1,188 @@
-import { auth, db } from "./firebase-config.js";
-import {
-  createUserWithEmailAndPassword, signInWithEmailAndPassword,
-  onAuthStateChanged, signOut, updateProfile
-} from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
-import {
-  ref, push, set, update, remove, onValue, get, child as dbChild
-} from "https://www.gstatic.com/firebasejs/10.13.0/firebase-database.js";
-
-/* =========================================================
-   ثوابت: الأدوار والصلاحيات
-   ========================================================= */
-const ROLE_LABELS = {
-  admin: "مدير النظام",
-  manager: "مدير الحضانة",
-  supervisor: "مشرف",
-  therapist: "أخصائي تخاطب",
-};
-const ROLE_CLASS = { admin: "role-admin", manager: "role-manager", supervisor: "role-supervisor", therapist: "role-therapist" };
-
-const PERMISSIONS = [
-  { key: "manage_users", label: "إدارة المستخدمين والصلاحيات" },
-  { key: "manage_children", label: "إضافة وتعديل بيانات الأطفال" },
-  { key: "manage_assignments", label: "تعيين المتابعين (الفريق) للأطفال" },
-  { key: "manage_attendance", label: "تسجيل الحضور والانصراف اليومي" },
-  { key: "manage_daily_log", label: "تسجيل يوميات الطفل (نوم، أكل، حالة)" },
-  { key: "manage_progress", label: "تسجيل مراحل التقدم" },
-  { key: "manage_plans", label: "إدارة الخطط العلاجية" },
-  { key: "manage_reports", label: "إنشاء وتعديل التقارير" },
-  { key: "view_reports", label: "الاطلاع على التقارير" },
-];
-
-function defaultPermissions(role) {
-  const all = Object.fromEntries(PERMISSIONS.map(p => [p.key, false]));
-  if (role === "admin") { Object.keys(all).forEach(k => all[k] = true); return all; }
-  if (role === "manager") return { ...all, manage_children: true, manage_assignments: true, manage_attendance: true, manage_daily_log: true, manage_progress: true, manage_plans: true, manage_reports: true, view_reports: true };
-  if (role === "supervisor") return { ...all, manage_attendance: true, manage_daily_log: true, manage_progress: true, manage_plans: true, manage_reports: true, view_reports: true };
-  if (role === "therapist") return { ...all, manage_daily_log: true, manage_progress: true, manage_reports: true, view_reports: true };
-  return all; // pending / no role
-}
-
-function can(user, perm) {
-  if (!user || !user.role) return false;
-  if (user.role === "admin") return true;
-  return !!(user.permissions && user.permissions[perm]);
-}
-
-/* =========================================================
-   الحالة العامة
-   ========================================================= */
-const state = {
-  authUid: null,
-  me: null,           // بروفايل المستخدم الحالي من users/{uid}
-  users: {},
-  children: {},
-  assignments: {},
-  attendance: {},
-  dailyLogs: {},
-  milestones: {},
-  plans: {},
-  reports: {},
-  view: "dashboard",
-  attendanceDate: new Date().toISOString().slice(0, 10),
-  childId: null,
-  childTab: "info",
-  loaded: { users: false, children: false, assignments: false, attendance: false, dailyLogs: false, milestones: false, plans: false, reports: false },
+const $ = s => document.querySelector(s);
+const content = $("#content");
+const titles = {
+  dashboard:"الرئيسية", children:"ملفات الأطفال", attendance:"الحضور والانصراف",
+  plans:"الخطط الفردية", sessions:"جلسات التخاطب", reports:"التقارير",
+  users:"المستخدمون والصلاحيات", settings:"الإعدادات"
 };
 
-/* =========================================================
-   أدوات مساعدة
-   ========================================================= */
-const $ = (sel, root = document) => root.querySelector(sel);
-const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
-const viewRoot = () => $("#viewRoot");
-
-function toast(msg) {
-  const el = document.createElement("div");
-  el.className = "toast";
-  el.textContent = msg;
-  $("#toastRoot").appendChild(el);
-  setTimeout(() => el.remove(), 2600);
-}
-
-// رسالة عربية مفهومة لأي خطأ يحصل أثناء الكتابة/القراءة في القاعدة،
-// بدل ما العملية تفشل بصمت (المودال يفضل فاتح والزرار يبان "مش بيعمل حاجة")
-function translateDbError(err) {
-  const code = (err && (err.code || err.message)) ? String(err.code || err.message).toUpperCase() : "";
-  if (code.includes("PERMISSION_DENIED")) {
-    return "معنديش صلاحية كافية لتنفيذ العملية دي. لو المفروض يكون عندك صلاحية، كلّم الأدمن يتأكد من دورك وصلاحياتك من شاشة (المستخدمون والصلاحيات).";
-  }
-  if (code.includes("NETWORK") || code.includes("FAILED-FETCH") || code.includes("UNAVAILABLE")) {
-    return "فيه مشكلة في الاتصال بالإنترنت. اتأكد من الاتصال وحاول تاني.";
-  }
-  console.error("DB error:", err);
-  return "حصل خطأ أثناء تنفيذ العملية: " + (err?.message || err);
-}
-
-// نفّذ عملية غير متزامنة (كتابة في القاعدة غالبًا) ولو فشلت اعرض توست بدل الفشل الصامت
-async function safeRun(promise, { successMsg, onSuccess } = {}) {
-  try {
-    await promise;
-    if (successMsg) toast(successMsg);
-    if (onSuccess) onSuccess();
-    return true;
-  } catch (err) {
-    toast(translateDbError(err));
-    return false;
-  }
-}
-
-// شبكة أمان: أي وعد (Promise) يترفض من غير ما حد يمسكه، نوريه للمستخدم
-// بدل ما يختفي بصمت ويبان إن "الزرار مش بيعمل حاجة"
-window.addEventListener("unhandledrejection", (e) => {
-  console.error("Unhandled promise rejection:", e.reason);
-  toast(translateDbError(e.reason));
-  e.preventDefault();
-});
-
-function fmtDate(d) {
-  if (!d) return "—";
-  try { return new Date(d).toLocaleDateString("ar-EG", { year: "numeric", month: "long", day: "numeric" }); }
-  catch { return d; }
-}
-
-function ageFromBirth(birthDate) {
-  if (!birthDate) return "—";
-  const b = new Date(birthDate), now = new Date();
-  let years = now.getFullYear() - b.getFullYear();
-  let months = now.getMonth() - b.getMonth();
-  if (now.getDate() < b.getDate()) months--;
-  if (months < 0) { years--; months += 12; }
-  if (years <= 0) return `${months} شهر`;
-  return `${years} سنة${months > 0 ? " و" + months + " شهر" : ""}`;
-}
-
-function initials(name) {
-  if (!name) return "؟";
-  return name.trim().split(" ").slice(0, 2).map(w => w[0]).join("");
-}
-
-function objToList(obj) {
-  return Object.entries(obj || {}).map(([id, v]) => ({ id, ...v }));
-}
-
-function closeModal() { const m = $("#modalOverlay"); if (m) m.remove(); }
-
-function openModal(html, { wide = false } = {}) {
-  closeModal();
-  const overlay = document.createElement("div");
-  overlay.className = "modal-overlay";
-  overlay.id = "modalOverlay";
-  overlay.innerHTML = `<div class="modal ${wide ? "wide" : ""}">${html}</div>`;
-  overlay.addEventListener("mousedown", (e) => { if (e.target === overlay) closeModal(); });
-  document.body.appendChild(overlay);
-  return overlay;
-}
-
-/* =========================================================
-   المصادقة (Auth)
-   ========================================================= */
-$$(".auth-tab").forEach(tab => {
-  tab.addEventListener("click", () => {
-    $$(".auth-tab").forEach(t => t.classList.remove("active"));
-    tab.classList.add("active");
-    const isLogin = tab.dataset.authtab === "login";
-    $("#loginForm").classList.toggle("hidden", !isLogin);
-    $("#signupForm").classList.toggle("hidden", isLogin);
-    $("#authError").classList.add("hidden");
+document.addEventListener("DOMContentLoaded", () => {
+  $("#loginForm").addEventListener("submit", login);
+  $("#logoutBtn").addEventListener("click", logout);
+  $("#closeModal").addEventListener("click", closeModal);
+  $("#nav").addEventListener("click", e => {
+    const btn = e.target.closest("button[data-page]");
+    if (btn) showPage(btn.dataset.page);
   });
 });
 
-function showAuthError(err) {
-  const box = $("#authError");
-  box.textContent = translateAuthError(err);
-  box.classList.remove("hidden");
-}
-function translateAuthError(err) {
-  const code = err?.code || "";
-  const map = {
-    "auth/invalid-email": "البريد الإلكتروني غير صحيح",
-    "auth/user-not-found": "لا يوجد حساب بهذا البريد",
-    "auth/wrong-password": "كلمة المرور غير صحيحة",
-    "auth/invalid-credential": "بيانات الدخول غير صحيحة",
-    "auth/email-already-in-use": "البريد الإلكتروني مُستخدم بالفعل",
-    "auth/weak-password": "كلمة المرور ضعيفة (6 أحرف على الأقل)",
-    "auth/operation-not-allowed": "تسجيل الدخول بالإيميل/الباسورد غير مفعّل في Firebase Authentication",
-    "custom/username-not-found": "لا يوجد حساب بهذا الاسم",
-    "custom/username-taken": "اسم المستخدم ده محجوز، جرّب اسم تاني",
-    "custom/invalid-username": "اسم المستخدم لازم يكون 3-20 حرف إنجليزي أو رقم (يسمح بـ _ و - فقط، من غير نقطة أو مسافات أو حروف عربية)",
-    "auth/too-many-requests": "محاولات كتير غلط. استنى شوية وحاول تاني",
-    "auth/user-disabled": "الحساب ده متوقف. كلّم الأدمن",
-    "auth/network-request-failed": "فيه مشكلة في الاتصال بالإنترنت. اتأكد من الاتصال وحاول تاني",
-  };
-  console.error("Auth/DB error:", err);
-  if (map[code]) return map[code];
-  // نعرض الخطأ الخام كمان عشان نقدر نشخّصه من غير ما نحتاج الـ Console
-  return `حصل خطأ: ${code || err?.message || err}`;
-}
-
-// فايربيز أوث بيشتغل بالإيميل، فبنبني إيميل داخلي (وهمي) من اسم المستخدم
-// عشان المستخدم يحس إنه بيدخل بـ"يوزر" عادي بس، من غير ما يكتب إيميل خالص
-const USERNAME_DOMAIN = "nursery-app.local";
-function usernameToEmail(username) { return `${username.toLowerCase()}@${USERNAME_DOMAIN}`; }
-function normalizeUsername(u) { return (u || "").trim().toLowerCase(); }
-
-$("#loginForm").addEventListener("submit", async (e) => {
+function login(e){
   e.preventDefault();
-  const username = normalizeUsername($("#loginUsername").value);
-  if (!/^[a-z0-9_\-]{1,20}$/.test(username)) {
-    showAuthError({ code: "custom/username-not-found" });
-    return;
-  }
-  try {
-    const snap = await get(ref(db, "usernames/" + username));
-    if (!snap.exists()) { showAuthError({ code: "custom/username-not-found" }); return; }
-    const email = snap.val().email;
-    await signInWithEmailAndPassword(auth, email, $("#loginPassword").value);
-  } catch (err) { showAuthError(err); }
-});
+  const email = $("#loginEmail").value.trim();
+  const password = $("#loginPassword").value;
+  if(!email || !password) return;
 
-$("#signupForm").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const name = $("#signupName").value.trim();
-  const username = normalizeUsername($("#signupUsername").value);
-  const password = $("#signupPassword").value;
+  /*
+    مؤقتًا: النموذج يقبل الدخول لأي بريد.
+    في الإنتاج:
+    1) Firebase Authentication للتحقق من البريد وكلمة المرور.
+    2) Firestore لجلب role المستخدم.
+  */
+  APP.currentUser = {id:"local-user", name:email.split("@")[0], email, role:"admin", roleLabel:"أدمن أساسي"};
+  $("#loginScreen").classList.add("hidden");
+  $("#app").classList.remove("hidden");
+  $("#userName").textContent = APP.currentUser.name;
+  $("#roleLabel").textContent = APP.currentUser.roleLabel;
+  applyPermissions();
+  showPage("dashboard");
+}
 
-  if (!/^[a-z0-9_\-]{3,20}$/.test(username)) {
-    showAuthError({ code: "custom/invalid-username" });
-    return;
-  }
+function logout(){
+  APP.currentUser = null;
+  $("#app").classList.add("hidden");
+  $("#loginScreen").classList.remove("hidden");
+  $("#loginForm").reset();
+}
 
-  try {
-    // اتأكد إن اسم المستخدم مش مكرر
-    const takenSnap = await get(ref(db, "usernames/" + username));
-    if (takenSnap.exists()) { showAuthError({ code: "custom/username-taken" }); return; }
-
-    const email = usernameToEmail(username);
-    const cred = await createUserWithEmailAndPassword(auth, email, password);
-    await updateProfile(cred.user, { displayName: name });
-
-    // مهم: بنتحقق هل ده أول مستخدم في النظام بعد إنشاء حساب الأوث (وبعد ما بقى مسجل دخول)
-    // لأن قراءة "users" محتاجة auth != null، ومش ممكن نتحقق منها قبل ما يبقى فيه مستخدم مسجل دخول
-    const usersSnap = await get(ref(db, "users"));
-    const isFirstUser = !usersSnap.exists();
-
-    const role = isFirstUser ? "admin" : null;
-    await set(ref(db, "users/" + cred.user.uid), {
-      name, username, email,
-      role,
-      permissions: defaultPermissions(role),
-      createdAt: Date.now(),
-    });
-    await set(ref(db, "usernames/" + username), { uid: cred.user.uid, email });
-
-    if (isFirstUser) toast("تم إنشاء أول حساب في النظام كمدير للنظام");
-    else toast("تم إنشاء الحساب، في انتظار تفعيل الأدمن للدور");
-  } catch (err) { showAuthError(err); }
-});
-
-$("#logoutBtn").addEventListener("click", () => signOut(auth));
-
-onAuthStateChanged(auth, (user) => {
-  if (user) {
-    state.authUid = user.uid;
-    listenAll();
-  } else {
-    state.authUid = null;
-    state.me = null;
-    $("#authScreen").classList.remove("hidden");
-    $("#appScreen").classList.add("hidden");
-  }
-});
-
-/* =========================================================
-   الاستماع اللحظي (Realtime listeners)
-   ========================================================= */
-function listenAll() {
-  onValue(ref(db, "users"), (snap) => {
-    state.users = snap.val() || {};
-    state.loaded.users = true;
-    state.me = state.authUid ? { uid: state.authUid, ...(state.users[state.authUid] || {}) } : null;
-    afterAuthReady();
-    renderShell();
-    renderCurrentView();
+function applyPermissions(){
+  const role = APP.currentUser.role;
+  document.querySelectorAll("#nav button").forEach(btn=>{
+    btn.classList.toggle("hidden", !permissions[role]?.[btn.dataset.page]);
   });
-  onValue(ref(db, "children"), (snap) => { state.children = snap.val() || {}; state.loaded.children = true; renderCurrentView(); });
-  onValue(ref(db, "assignments"), (snap) => { state.assignments = snap.val() || {}; state.loaded.assignments = true; renderCurrentView(); });
-  onValue(ref(db, "attendance"), (snap) => { state.attendance = snap.val() || {}; state.loaded.attendance = true; renderCurrentView(); });
-  onValue(ref(db, "dailyLogs"), (snap) => { state.dailyLogs = snap.val() || {}; state.loaded.dailyLogs = true; renderCurrentView(); });
-  onValue(ref(db, "milestones"), (snap) => { state.milestones = snap.val() || {}; state.loaded.milestones = true; renderCurrentView(); });
-  onValue(ref(db, "plans"), (snap) => { state.plans = snap.val() || {}; state.loaded.plans = true; renderCurrentView(); });
-  onValue(ref(db, "reports"), (snap) => { state.reports = snap.val() || {}; state.loaded.reports = true; renderCurrentView(); });
 }
 
-function afterAuthReady() {
-  $("#authScreen").classList.add("hidden");
-  $("#appScreen").classList.remove("hidden");
+function showPage(page){
+  if(!permissions[APP.currentUser.role]?.[page]) return;
+  document.querySelectorAll("#nav button").forEach(b=>b.classList.toggle("active", b.dataset.page===page));
+  $("#pageTitle").textContent = titles[page] || "";
+  const views = {dashboard,children,attendance,plans,sessions,reports,users,settings};
+  views[page]?.();
 }
 
-/* =========================================================
-   القشرة العامة: القوائم الجانبية وبيانات المستخدم
-   ========================================================= */
-function renderShell() {
-  const me = state.me;
-  if (!me) return;
-  $("#topUserName").textContent = me.name || me.email || "مستخدم";
-  $("#topUserRole").textContent = me.role ? ROLE_LABELS[me.role] : "بانتظار التفعيل";
-  $("#topUserAvatar").textContent = initials(me.name);
-  $("#sideRoleChip").textContent = me.role ? ROLE_LABELS[me.role] : "بانتظار التفعيل";
-  $("#navUsers").classList.toggle("hidden", !can(me, "manage_users"));
-}
-
-$$(".nav-item[data-nav]").forEach(btn => {
-  btn.addEventListener("click", () => {
-    state.view = btn.dataset.nav;
-    state.childId = null;
-    $$(".nav-item[data-nav]").forEach(b => b.classList.remove("active"));
-    btn.classList.add("active");
-    renderCurrentView();
-  });
-});
-
-/* =========================================================
-   الموجّه (Router)
-   ========================================================= */
-function renderCurrentView() {
-  if (!state.me) return;
-  if (!state.me.role) return renderPending();
-
-  const titles = {
-    dashboard: ["لوحة التحكم", "نظرة عامة على الحضانة اليوم"],
-    children: ["الأطفال", "بيانات الأطفال ومتابعتهم"],
-    attendance: ["الحضور والانصراف", "تسجيل حضور وانصراف الأطفال يوميًا"],
-    reports: ["التقارير", "كل التقارير المسجّلة على مستوى الحضانة"],
-    users: ["المستخدمون والصلاحيات", "إدارة الأدوار وتحديد الصلاحيات"],
-    childDetail: ["ملف الطفل", ""],
-  };
-  const t = titles[state.view] || ["", ""];
-  $("#pageTitle").textContent = t[0];
-  $("#pageSub").textContent = t[1];
-
-  if (state.view === "dashboard") return renderDashboard();
-  if (state.view === "children") return renderChildrenList();
-  if (state.view === "attendance") return renderAttendance();
-  if (state.view === "reports") return renderGlobalReports();
-  if (state.view === "users") return can(state.me, "manage_users") ? renderUsers() : renderNoAccess();
-  if (state.view === "childDetail") return renderChildDetail();
-}
-
-function renderNoAccess() {
-  viewRoot().innerHTML = `<div class="card empty"><div class="big">🚫</div><h3>مفيش صلاحية</h3><p>محتاج صلاحية إضافية من الأدمن عشان تدخل هنا</p></div>`;
-}
-
-function renderPending() {
-  $("#pageTitle").textContent = "بانتظار التفعيل";
-  $("#pageSub").textContent = "";
-  viewRoot().innerHTML = `
-    <div class="card empty">
-      <div class="big">⏳</div>
-      <h3>حسابك بانتظار التفعيل</h3>
-      <p>الأدمن هيراجع حسابك ويحدد دورك وصلاحياتك (مدير / مشرف / أخصائي تخاطب) قريبًا</p>
+function dashboard(){
+  content.innerHTML = `
+    <div class="grid stats">
+      ${stat("إجمالي الأطفال", APP.children.length)}
+      ${stat("حضور اليوم", APP.attendance.filter(x=>x.status==="present").length)}
+      ${stat("الخطط الفردية", APP.plans.length)}
+      ${stat("جلسات التخاطب", APP.sessions.length)}
+    </div>
+    <div class="grid two" style="margin-top:15px">
+      <div class="card"><div class="section-title"><h3>آخر الأطفال</h3></div>${APP.children.length?APP.children.slice(-5).reverse().map(childRow).join(""):'<div class="empty">لا توجد بيانات بعد. أضف أول طفل من «ملفات الأطفال».</div>'}</div>
+      <div class="card"><div class="section-title"><h3>حالة النظام</h3></div>
+        <div class="list">
+          <div class="list-item">البيانات الحالية: <strong>فارغة</strong></div>
+          <div class="list-item">مصدر التخزين: <strong>Local JS — قابل للاستبدال بـ Firebase</strong></div>
+          <div class="list-item">الصلاحيات: <strong>Admin / Supervisor / Speech</strong></div>
+        </div>
+      </div>
     </div>`;
 }
+function stat(label,num){return `<div class="card stat"><div class="muted">${label}</div><div class="num">${num}</div></div>`}
+function childRow(c){return `<div class="list-item"><strong>${esc(c.name)}</strong><div class="muted">${esc(c.condition||"")}</div></div>`}
 
-/* =========================================================
-   لوحة التحكم
-   ========================================================= */
-function renderDashboard() {
-  const childrenList = objToList(state.children);
-  const activeChildren = childrenList.filter(c => c.status !== "paused");
-  const usersList = objToList(state.users);
-  const reportsList = objToList(state.reports);
-  const activeAssignments = objToList(state.assignments).filter(a => !a.to);
-
-  const today = new Date().toISOString().slice(0, 10);
-  const todayAttendance = latestAttendanceByChild(today);
-  const presentToday = Object.values(todayAttendance).filter(a => a.status === "present" || a.status === "late").length;
-
-  const recentReports = reportsList.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)).slice(0, 5);
-
-  viewRoot().innerHTML = `
-    <div class="grid grid-4">
-      ${statCard("👶", childrenList.length, "عدد الأطفال المسجّلين", "teal")}
-      ${statCard("🧑‍⚕️", usersList.filter(u => u.role === "therapist").length, "أخصائيو تخاطب", "plum")}
-      ${statCard("🗓️", `${presentToday}/${activeChildren.length}`, "حضور اليوم", "apricot")}
-      ${statCard("📄", reportsList.length, "إجمالي التقارير", "rose")}
-    </div>
-
-    <div class="section-title"><h3>أحدث التقارير</h3></div>
-    <div class="list-card">
-      ${recentReports.length ? recentReports.map(r => reportRow(r)).join("") : emptyRow("لسه مفيش تقارير مسجّلة")}
-    </div>
-  `;
-  bindReportRowClicks();
+function children(){
+  content.innerHTML = `
+  <div class="toolbar"><div class="muted">أضف ملفات الأطفال الخاصة بالمركز فقط.</div><div class="actions"><button class="btn primary" onclick="openChildForm()">+ إضافة طفل</button></div></div>
+  <div class="card"><div class="table-wrap"><table><thead><tr><th>الاسم</th><th>العمر</th><th>الحالة/التشخيص</th><th>المجموعة</th><th>المتابع</th><th></th></tr></thead>
+  <tbody>${APP.children.length?APP.children.map(c=>`<tr><td>${esc(c.name)}</td><td>${esc(c.age)}</td><td>${esc(c.condition)}</td><td>${esc(c.group)}</td><td>${esc(c.therapist)}</td><td><button class="btn secondary" onclick="viewChild('${c.id}')">فتح الملف</button></td></tr>`).join(""):`<tr><td colspan="6"><div class="empty">لا توجد ملفات أطفال.</div></td></tr>`}</tbody></table></div></div>`;
+}
+function openChildForm(){
+  modal("إضافة ملف طفل", `
+  <form onsubmit="saveChild(event)">
+    <div class="form-grid">
+      <label>اسم الطفل<input name="name" required></label><label>العمر<input name="age"></label>
+      <label>الحالة/التشخيص<input name="condition"></label><label>المجموعة<input name="group"></label>
+      <label>المتابع/الأخصائي<input name="therapist"></label><label>ولي الأمر<input name="guardian"></label>
+      <label>الهاتف<input name="phone"></label><label>تاريخ الميلاد<input name="birth" type="date"></label>
+      <label class="full-col">ملاحظات<textarea name="notes"></textarea></label>
+    </div><button class="btn primary">حفظ الملف</button>
+  </form>`);
+}
+function saveChild(e){
+  e.preventDefault(); const f=new FormData(e.target);
+  APP.children.push({id:id(),...Object.fromEntries(f),progress:0});
+  closeModal(); children();
+}
+function viewChild(id){
+  const c=APP.children.find(x=>x.id===id); if(!c)return;
+  modal("ملف الطفل", `<div class="grid two">
+    <div class="card"><h3>${esc(c.name)}</h3><p>العمر: ${esc(c.age)}</p><p>الحالة: ${esc(c.condition)}</p><p>المجموعة: ${esc(c.group)}</p><p>المتابع: ${esc(c.therapist)}</p></div>
+    <div class="card"><p>ولي الأمر: ${esc(c.guardian)}</p><p>الهاتف: ${esc(c.phone)}</p><p>تاريخ الميلاد: ${esc(c.birth)}</p><p>ملاحظات: ${esc(c.notes)}</p></div></div>`);
 }
 
-function statCard(icon, num, lbl, color) {
-  const tint = { teal: "var(--teal-tint)", plum: "var(--plum-tint)", apricot: "var(--apricot-tint)", rose: "var(--rose-tint)" }[color];
-  const fg = { teal: "var(--teal-dark)", plum: "var(--plum)", apricot: "#8a5417", rose: "var(--rose)" }[color];
-  return `<div class="card stat-card">
-    <div class="icon" style="background:${tint};color:${fg}">${icon}</div>
-    <div class="num">${num}</div>
-    <div class="lbl">${lbl}</div>
-  </div>`;
+function attendance(){
+  content.innerHTML=`<div class="toolbar"><div class="muted">سجل الحضور اليومي للأطفال.</div><button class="btn primary" onclick="openAttendanceForm()">+ تسجيل حضور</button></div>
+  <div class="card"><div class="table-wrap"><table><thead><tr><th>التاريخ</th><th>الطفل</th><th>الحالة</th><th>وقت الدخول</th><th>وقت الانصراف</th></tr></thead><tbody>
+  ${APP.attendance.length?APP.attendance.map(a=>`<tr><td>${esc(a.date)}</td><td>${esc(childName(a.childId))}</td><td>${esc(a.status)}</td><td>${esc(a.in)}</td><td>${esc(a.out)}</td></tr>`).join(""):`<tr><td colspan="5"><div class="empty">لا يوجد سجل حضور.</div></td></tr>`}</tbody></table></div></div>`;
+}
+function openAttendanceForm(){
+  modal("تسجيل حضور", `<form onsubmit="saveAttendance(event)">
+    <label>الطفل<select name="childId" required>${childOptions()}</select></label>
+    <div class="form-grid"><label>التاريخ<input name="date" type="date" value="${today()}"></label><label>الحالة<select name="status"><option>present</option><option>absent</option><option>late</option><option>excused</option></select></label><label>وقت الدخول<input name="in" type="time"></label><label>وقت الانصراف<input name="out" type="time"></label></div>
+    <button class="btn primary">حفظ</button></form>`);
+}
+function saveAttendance(e){e.preventDefault();const f=new FormData(e.target);APP.attendance.push({id:id(),...Object.fromEntries(f)});closeModal();attendance()}
+
+function plans(){
+  content.innerHTML=`<div class="toolbar"><div class="muted">خطط فردية بأهداف قابلة للقياس.</div><button class="btn primary" onclick="openPlanForm()">+ إضافة خطة</button></div>
+  <div class="grid">${APP.plans.length?APP.plans.map(p=>`<div class="card"><div class="section-title"><h3>${esc(p.goal)}</h3><span>${esc(childName(p.childId))}</span></div><p class="muted">الأساس: ${esc(p.baseline)} — الهدف: ${esc(p.target)} — الفترة: ${esc(p.period)}</p><div class="progress"><i style="width:${Number(p.progress)||0}%"></i></div><small>${Number(p.progress)||0}%</small></div>`).join(""):'<div class="card empty">لا توجد خطط فردية.</div>'}</div>`;
+}
+function openPlanForm(){
+ modal("إضافة خطة فردية",`<form onsubmit="savePlan(event)">
+  <label>الطفل<select name="childId" required>${childOptions()}</select></label>
+  <div class="form-grid"><label>الهدف<input name="goal" required></label><label>الفترة<input name="period" placeholder="مثال: 3 أشهر"></label><label>خط الأساس<input name="baseline"></label><label>المستهدف<input name="target"></label><label>نسبة التقدم %<input name="progress" type="number" min="0" max="100" value="0"></label></div>
+  <button class="btn primary">حفظ الخطة</button></form>`);
+}
+function savePlan(e){e.preventDefault();const f=new FormData(e.target);APP.plans.push({id:id(),...Object.fromEntries(f)});closeModal();plans()}
+
+function sessions(){
+ content.innerHTML=`<div class="toolbar"><div class="muted">توثيق جلسات التخاطب والمهارات والملاحظات.</div><button class="btn primary" onclick="openSessionForm()">+ إضافة جلسة</button></div>
+ <div class="card"><div class="table-wrap"><table><thead><tr><th>التاريخ</th><th>الطفل</th><th>الأخصائي</th><th>الهدف</th><th>التقييم</th></tr></thead><tbody>
+ ${APP.sessions.length?APP.sessions.map(s=>`<tr><td>${esc(s.date)}</td><td>${esc(childName(s.childId))}</td><td>${esc(s.therapist)}</td><td>${esc(s.goal)}</td><td>${esc(s.evaluation)}</td></tr>`).join(""):`<tr><td colspan="5"><div class="empty">لا توجد جلسات مسجلة.</div></td></tr>`}</tbody></table></div></div>`;
+}
+function openSessionForm(){
+ modal("إضافة جلسة تخاطب",`<form onsubmit="saveSession(event)">
+ <div class="form-grid"><label>الطفل<select name="childId" required>${childOptions()}</select></label><label>التاريخ<input name="date" type="date" value="${today()}"></label><label>الأخصائي<input name="therapist"></label><label>مدة الجلسة<input name="duration"></label><label>الهدف<input name="goal"></label><label>التقييم<input name="evaluation"></label><label class="full-col">ملاحظات<textarea name="notes"></textarea></label></div><button class="btn primary">حفظ الجلسة</button></form>`);
+}
+function saveSession(e){e.preventDefault();const f=new FormData(e.target);APP.sessions.push({id:id(),...Object.fromEntries(f)});closeModal();sessions()}
+
+function reports(){
+ content.innerHTML=`<div class="toolbar"><div class="muted">أنشئ تقارير متابعة بناءً على البيانات التي تدخلها.</div><button class="btn primary" onclick="openReportForm()">+ إضافة تقرير</button></div>
+ <div class="grid">${APP.reports.length?APP.reports.map(r=>`<div class="card"><div class="section-title"><h3>${esc(r.title)}</h3><span>${esc(r.date)}</span></div><p>${esc(r.summary)}</p><button class="btn secondary" onclick="printReport('${r.id}')">طباعة</button></div>`).join(""):'<div class="card empty">لا توجد تقارير.</div>'}</div>`;
+}
+function openReportForm(){
+ modal("إضافة تقرير",`<form onsubmit="saveReport(event)">
+ <div class="form-grid"><label>الطفل<select name="childId" required>${childOptions()}</select></label><label>التاريخ<input name="date" type="date" value="${today()}"></label><label class="full-col">عنوان التقرير<input name="title" required></label><label class="full-col">ملخص التقرير<textarea name="summary" required></textarea></label></div><button class="btn primary">حفظ التقرير</button></form>`);
+}
+function saveReport(e){e.preventDefault();const f=new FormData(e.target);APP.reports.push({id:id(),...Object.fromEntries(f)});closeModal();reports()}
+function printReport(id){
+ const r=APP.reports.find(x=>x.id===id); if(!r)return;
+ const w=window.open("","_blank"); w.document.write(`<html dir="rtl"><head><title>${esc(r.title)}</title></head><body style="font-family:Arial;padding:40px"><h1>${esc(r.title)}</h1><p>الطفل: ${esc(childName(r.childId))}</p><p>التاريخ: ${esc(r.date)}</p><hr><p>${esc(r.summary)}</p><script>window.print()<\/script></body></html>`);w.document.close();
 }
 
-function emptyRow(msg) { return `<div class="empty">${msg}</div>`; }
+function users(){
+ content.innerHTML=`<div class="toolbar"><div class="muted">إدارة المستخدمين والأدوار. لا توجد حسابات افتراضية.</div><button class="btn primary" onclick="openUserForm()">+ إضافة مستخدم</button></div>
+ <div class="card"><div class="table-wrap"><table><thead><tr><th>الاسم</th><th>البريد</th><th>الدور</th></tr></thead><tbody>${APP.users.length?APP.users.map(u=>`<tr><td>${esc(u.name)}</td><td>${esc(u.email)}</td><td>${esc(u.roleLabel)}</td></tr>`).join(""):`<tr><td colspan="3"><div class="empty">لا يوجد مستخدمون في النموذج.</div></td></tr>`}</tbody></table></div></div>`;
+}
+function openUserForm(){
+ modal("إضافة مستخدم",`<form onsubmit="saveUser(event)">
+ <div class="form-grid"><label>الاسم<input name="name" required></label><label>البريد الإلكتروني<input name="email" type="email" required></label><label>الدور<select name="role"><option value="admin">أدمن أساسي</option><option value="supervisor">مشرف</option><option value="speech">مسؤول تخاطب</option></select></label><label>كلمة المرور<input name="password" type="password"></label></div>
+ <p class="muted">هذا النموذج لا ينشئ حساب Firebase فعليًا؛ اربطه بـ Firebase Authentication.</p><button class="btn primary">حفظ</button></form>`);
+}
+function saveUser(e){e.preventDefault();const f=new FormData(e.target);const x=Object.fromEntries(f);x.id=id();x.roleLabel={admin:"أدمن أساسي",supervisor:"مشرف",speech:"مسؤول تخاطب"}[x.role];APP.users.push(x);closeModal();users()}
 
-/* =========================================================
-   الأطفال — القائمة
-   ========================================================= */
-function renderChildrenList() {
-  const list = objToList(state.children).sort((a, b) => (a.name || "").localeCompare(b.name || "", "ar"));
-  const addBtn = can(state.me, "manage_children")
-    ? `<button class="btn btn-primary" id="addChildBtn">+ إضافة طفل</button>` : "";
-
-  viewRoot().innerHTML = `
-    <div style="display:flex;justify-content:flex-end;margin-bottom:16px">${addBtn}</div>
-    <div class="list-card">
-      ${list.length ? list.map(c => childRow(c)).join("") : emptyRow("لسه مفيش أطفال مسجّلين — ابدأ بإضافة طفل")}
-    </div>
-  `;
-  $("#addChildBtn")?.addEventListener("click", () => openChildForm());
-  $$(".js-open-child").forEach(el => el.addEventListener("click", () => {
-    state.view = "childDetail"; state.childId = el.dataset.id; state.childTab = "info";
-    renderCurrentView();
-  }));
-  $$(".js-edit-child").forEach(el => el.addEventListener("click", (e) => { e.stopPropagation(); openChildForm(el.dataset.id); }));
-  $$(".js-del-child").forEach(el => el.addEventListener("click", (e) => { e.stopPropagation(); confirmDeleteChild(el.dataset.id); }));
+function settings(){
+ content.innerHTML=`<div class="grid two">
+  <div class="card"><h3>إعدادات المركز</h3><label>اسم المركز<input placeholder="أدخل اسم المركز"></label><label>الهاتف<input></label><label>العنوان<textarea></textarea></label><button class="btn primary">حفظ الإعدادات</button></div>
+  <div class="card"><h3>الربط المقترح</h3><p class="muted">Firebase Authentication للحسابات، Firestore للبيانات، Storage للملفات والصور، وSecurity Rules للصلاحيات.</p><div class="list"><div class="list-item">users</div><div class="list-item">children</div><div class="list-item">plans</div><div class="list-item">sessions</div><div class="list-item">attendance</div><div class="list-item">reports</div><div class="list-item">auditLogs</div></div></div>
+ </div>`;
 }
 
-function childRow(c) {
-  const canEdit = can(state.me, "manage_children");
-  return `
-  <div class="row js-open-child" data-id="${c.id}" style="cursor:pointer">
-    <div class="row-main">
-      <div class="row-avatar">${initials(c.name)}</div>
-      <div>
-        <div class="row-title">${esc(c.name)}</div>
-        <div class="row-sub">العمر: ${ageFromBirth(c.birthDate)} · تاريخ الالتحاق: ${fmtDate(c.enrollDate)}</div>
-      </div>
-    </div>
-    <div class="row-actions">
-      <span class="badge ${c.status === "paused" ? "badge-gray" : "badge-teal"}">${c.status === "paused" ? "متوقف" : "نشط"}</span>
-      ${canEdit ? `<button class="btn btn-ghost btn-sm js-edit-child" data-id="${c.id}">تعديل</button>
-      <button class="btn btn-danger btn-sm js-del-child" data-id="${c.id}">حذف</button>` : ""}
-    </div>
-  </div>`;
-}
-
-function esc(s) { return (s ?? "").toString().replace(/[&<>"']/g, m => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m])); }
-
-function openChildForm(id) {
-  const c = id ? state.children[id] : {};
-  openModal(`
-    <div class="modal-head"><h3>${id ? "تعديل بيانات الطفل" : "إضافة طفل جديد"}</h3><button class="modal-close" id="mClose">✕</button></div>
-    <form id="childForm">
-      <div class="grid grid-2">
-        <div class="field"><label>اسم الطفل</label><input type="text" id="cf_name" required value="${esc(c.name)}"></div>
-        <div class="field"><label>تاريخ الميلاد</label><input type="date" id="cf_birthDate" required value="${c.birthDate || ""}"></div>
-        <div class="field"><label>النوع</label>
-          <select id="cf_gender">
-            <option value="ذكر" ${c.gender === "ذكر" ? "selected" : ""}>ذكر</option>
-            <option value="أنثى" ${c.gender === "أنثى" ? "selected" : ""}>أنثى</option>
-          </select>
-        </div>
-        <div class="field"><label>تاريخ الالتحاق بالحضانة</label><input type="date" id="cf_enrollDate" value="${c.enrollDate || ""}"></div>
-        <div class="field"><label>اسم ولي الأمر</label><input type="text" id="cf_parentName" value="${esc(c.parentName)}"></div>
-        <div class="field"><label>رقم تواصل ولي الأمر</label><input type="tel" id="cf_parentPhone" value="${esc(c.parentPhone)}"></div>
-      </div>
-      <div class="field"><label>التشخيص / الحالة</label><input type="text" id="cf_diagnosis" placeholder="مثال: تأخر لغوي، اضطراب نطق..." value="${esc(c.diagnosis)}"></div>
-      <div class="field"><label>ملاحظات عامة</label><textarea id="cf_notes">${esc(c.notes)}</textarea></div>
-      <div class="field"><label>الحالة</label>
-        <select id="cf_status">
-          <option value="active" ${c.status !== "paused" ? "selected" : ""}>نشط</option>
-          <option value="paused" ${c.status === "paused" ? "selected" : ""}>متوقف مؤقتًا</option>
-        </select>
-      </div>
-      <div class="modal-actions">
-        <button type="submit" class="btn btn-primary">حفظ</button>
-        <button type="button" class="btn btn-ghost" id="mCancel">إلغاء</button>
-      </div>
-    </form>
-  `);
-  $("#mClose").onclick = $("#mCancel").onclick = closeModal;
-  $("#childForm").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const data = {
-      name: $("#cf_name").value.trim(),
-      birthDate: $("#cf_birthDate").value,
-      gender: $("#cf_gender").value,
-      enrollDate: $("#cf_enrollDate").value,
-      parentName: $("#cf_parentName").value.trim(),
-      parentPhone: $("#cf_parentPhone").value.trim(),
-      diagnosis: $("#cf_diagnosis").value.trim(),
-      notes: $("#cf_notes").value.trim(),
-      status: $("#cf_status").value,
-    };
-    let ok;
-    if (id) { ok = await safeRun(update(ref(db, "children/" + id), data), { successMsg: "تم تحديث بيانات الطفل" }); }
-    else {
-      data.createdAt = Date.now(); data.createdBy = state.authUid;
-      ok = await safeRun(push(ref(db, "children"), data), { successMsg: "تمت إضافة الطفل" });
-    }
-    if (ok) closeModal();
-  });
-}
-
-function confirmDeleteChild(id) {
-  const c = state.children[id];
-  openModal(`
-    <div class="modal-head"><h3>حذف الطفل</h3><button class="modal-close" id="mClose">✕</button></div>
-    <p>هل أنت متأكد من حذف <b>${esc(c?.name)}</b>؟ هيتم حذف كل البيانات المرتبطة بيه (المتابعون، التقدم، الخطط، التقارير) ولا يمكن التراجع.</p>
-    <div class="modal-actions">
-      <button class="btn btn-danger" id="confirmDel">حذف نهائي</button>
-      <button class="btn btn-ghost" id="mCancel">إلغاء</button>
-    </div>
-  `);
-  $("#mClose").onclick = $("#mCancel").onclick = closeModal;
-  $("#confirmDel").onclick = async () => {
-    const updates = { ["children/" + id]: null };
-    objToList(state.assignments).filter(a => a.childId === id).forEach(a => updates["assignments/" + a.id] = null);
-    objToList(state.attendance).filter(a => a.childId === id).forEach(a => updates["attendance/" + a.id] = null);
-    objToList(state.dailyLogs).filter(l => l.childId === id).forEach(l => updates["dailyLogs/" + l.id] = null);
-    objToList(state.milestones).filter(m => m.childId === id).forEach(m => updates["milestones/" + m.id] = null);
-    objToList(state.plans).filter(p => p.childId === id).forEach(p => updates["plans/" + p.id] = null);
-    objToList(state.reports).filter(r => r.childId === id).forEach(r => updates["reports/" + r.id] = null);
-    const ok = await safeRun(update(ref(db), updates), { successMsg: "تم حذف الطفل وكل بياناته" });
-    if (!ok) return;
-    closeModal();
-    if (state.view === "childDetail" && state.childId === id) { state.view = "children"; }
-    renderCurrentView();
-  };
-}
-
-/* =========================================================
-   الحضور والانصراف اليومي
-   ========================================================= */
-const ATT_STATUS = {
-  present: ["حاضر", "badge-teal"],
-  late: ["متأخر", "badge-apricot"],
-  absent: ["غائب", "badge-rose"],
-};
-
-// بياخد كل سجلات الحضور وير جع لكل طفل آخر سجل بتاريخ معيّن (لو سُجّل أكتر من مرة في نفس اليوم)
-function latestAttendanceByChild(date) {
-  const list = objToList(state.attendance).filter(a => a.date === date);
-  const byChild = {};
-  list.forEach(a => {
-    const prev = byChild[a.childId];
-    if (!prev || (a.recordedAt || 0) > (prev.recordedAt || 0)) byChild[a.childId] = a;
-  });
-  return byChild;
-}
-
-function renderAttendance() {
-  const canManage = can(state.me, "manage_attendance");
-  const date = state.attendanceDate || new Date().toISOString().slice(0, 10);
-  const childrenList = objToList(state.children).filter(c => c.status !== "paused")
-    .sort((a, b) => (a.name || "").localeCompare(b.name || "", "ar"));
-  const byChild = latestAttendanceByChild(date);
-
-  viewRoot().innerHTML = `
-    <div class="card" style="margin-bottom:16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-      <div class="field" style="margin:0"><label>التاريخ</label><input type="date" id="attDate" value="${date}"></div>
-      <div class="hint" style="margin-top:18px">${childrenList.length} طفل نشط · ${Object.values(byChild).filter(a => a.status === "present" || a.status === "late").length} حاضر النهاردة</div>
-    </div>
-    <div class="list-card">
-      ${childrenList.length ? childrenList.map(c => attendanceRow(c, byChild[c.id], canManage)).join("") : emptyRow("لسه مفيش أطفال نشطين مسجّلين")}
-    </div>
-  `;
-
-  $("#attDate").addEventListener("change", (e) => { state.attendanceDate = e.target.value; renderAttendance(); });
-
-  $$(".js-att-mark").forEach(btn => btn.addEventListener("click", async () => {
-    const childId = btn.dataset.id, status = btn.dataset.status;
-    const now = new Date();
-    const data = {
-      childId, date, status,
-      checkIn: status === "absent" ? null : now.toTimeString().slice(0, 5),
-      recordedBy: state.authUid, recordedAt: Date.now(),
-    };
-    await safeRun(push(ref(db, "attendance"), data), { successMsg: "تم تسجيل " + ATT_STATUS[status][0] });
-  }));
-
-  $$(".js-att-detail").forEach(btn => btn.addEventListener("click", () => openAttendanceDetail(btn.dataset.id, date, byChild[btn.dataset.id])));
-}
-
-function attendanceRow(c, rec, canManage) {
-  const st = rec ? ATT_STATUS[rec.status] : null;
-  return `
-  <div class="row">
-    <div class="row-main">
-      <div class="row-avatar">${initials(c.name)}</div>
-      <div>
-        <div class="row-title">${esc(c.name)}</div>
-        <div class="row-sub">${rec ? (rec.checkIn ? "دخول " + rec.checkIn : "") + (rec.checkOut ? " · انصراف " + rec.checkOut : "") : "لسه متسجلش"}</div>
-      </div>
-    </div>
-    <div class="row-actions">
-      ${st ? `<span class="badge ${st[1]}">${st[0]}</span>` : `<span class="badge badge-gray">غير مسجّل</span>`}
-      ${canManage ? `
-        <button class="btn btn-ghost btn-sm js-att-mark" data-id="${c.id}" data-status="present">حاضر</button>
-        <button class="btn btn-ghost btn-sm js-att-mark" data-id="${c.id}" data-status="late">متأخر</button>
-        <button class="btn btn-ghost btn-sm js-att-mark" data-id="${c.id}" data-status="absent">غائب</button>
-        <button class="btn btn-ghost btn-sm js-att-detail" data-id="${c.id}">تفاصيل</button>
-      ` : ""}
-    </div>
-  </div>`;
-}
-
-function openAttendanceDetail(childId, date, rec) {
-  const c = state.children[childId];
-  openModal(`
-    <div class="modal-head"><h3>حضور ${esc(c?.name)} — ${fmtDate(date)}</h3><button class="modal-close" id="mClose">✕</button></div>
-    <form id="attForm">
-      <div class="grid grid-2">
-        <div class="field"><label>وقت الدخول</label><input type="time" id="at_in" value="${rec?.checkIn || ""}"></div>
-        <div class="field"><label>وقت الانصراف</label><input type="time" id="at_out" value="${rec?.checkOut || ""}"></div>
-      </div>
-      <div class="field"><label>ملاحظات</label><input type="text" id="at_notes" value="${esc(rec?.notes)}" placeholder="مثال: جاء متأخر بسبب المرور"></div>
-      <div class="modal-actions">
-        <button type="submit" class="btn btn-primary">حفظ</button>
-        <button type="button" class="btn btn-ghost" id="mCancel">إلغاء</button>
-      </div>
-    </form>
-  `);
-  $("#mClose").onclick = $("#mCancel").onclick = closeModal;
-  $("#attForm").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const data = {
-      childId, date, status: rec?.status || "present",
-      checkIn: $("#at_in").value || null, checkOut: $("#at_out").value || null,
-      notes: $("#at_notes").value.trim(), recordedBy: state.authUid, recordedAt: Date.now(),
-    };
-    const ok = await safeRun(rec?.id ? update(ref(db, "attendance/" + rec.id), data) : push(ref(db, "attendance"), data), { successMsg: "تم حفظ بيانات الحضور" });
-    if (ok) closeModal();
-  });
-}
-
-/* =========================================================
-   ملف الطفل — تفاصيل بتابات
-   ========================================================= */
-function renderChildDetail() {
-  const c = state.children[state.childId];
-  if (!c) { state.view = "children"; return renderCurrentView(); }
-  $("#pageTitle").textContent = c.name;
-  $("#pageSub").textContent = `العمر ${ageFromBirth(c.birthDate)} · تاريخ الميلاد ${fmtDate(c.birthDate)}`;
-
-  const tabs = [
-    ["info", "البيانات"],
-    ["followers", "المتابعون"],
-    ["dailylog", "يوميات الطفل"],
-    ["progress", "مراحل التقدم"],
-    ["plan", "الخطة العلاجية"],
-    ["reports", "التقارير"],
-  ];
-
-  viewRoot().innerHTML = `
-    <button class="btn btn-ghost btn-sm" id="backToChildren" style="margin-bottom:14px">→ رجوع لكل الأطفال</button>
-    <div class="tabs">
-      ${tabs.map(([k, l]) => `<button class="tab ${state.childTab === k ? "active" : ""}" data-tab="${k}">${l}</button>`).join("")}
-    </div>
-    <div id="childTabBody"></div>
-  `;
-  $("#backToChildren").onclick = () => { state.view = "children"; renderCurrentView(); };
-  $$(".tab[data-tab]").forEach(t => t.onclick = () => { state.childTab = t.dataset.tab; renderCurrentView(); });
-
-  const body = $("#childTabBody");
-  if (state.childTab === "info") body.innerHTML = childInfoTab(c);
-  if (state.childTab === "followers") return renderFollowersTab(c);
-  if (state.childTab === "dailylog") return renderDailyLogTab(c);
-  if (state.childTab === "progress") return renderProgressTab(c);
-  if (state.childTab === "plan") return renderPlanTab(c);
-  if (state.childTab === "reports") return renderChildReportsTab(c);
-}
-
-function childInfoTab(c) {
-  return `
-  <div class="card">
-    <div class="grid grid-2">
-      ${infoField("الاسم", c.name)}
-      ${infoField("تاريخ الميلاد", fmtDate(c.birthDate))}
-      ${infoField("العمر الحالي", ageFromBirth(c.birthDate))}
-      ${infoField("النوع", c.gender)}
-      ${infoField("تاريخ الالتحاق", fmtDate(c.enrollDate))}
-      ${infoField("الحالة", c.status === "paused" ? "متوقف مؤقتًا" : "نشط")}
-      ${infoField("اسم ولي الأمر", c.parentName)}
-      ${infoField("رقم التواصل", c.parentPhone)}
-      ${infoField("التشخيص / الحالة", c.diagnosis)}
-    </div>
-    ${c.notes ? `<div style="margin-top:16px"><div class="hint" style="font-weight:800;color:var(--ink);margin-bottom:6px">ملاحظات</div><p>${esc(c.notes)}</p></div>` : ""}
-  </div>`;
-}
-function infoField(label, val) {
-  return `<div><div class="hint" style="margin-bottom:2px">${label}</div><div style="font-weight:700">${esc(val) || "—"}</div></div>`;
-}
-
-/* ---------- المتابعون (الفريق المسؤول عن الطفل) ---------- */
-function renderFollowersTab(c) {
-  const list = objToList(state.assignments).filter(a => a.childId === c.id)
-    .sort((a, b) => (b.from || "").localeCompare(a.from || ""));
-  const canManage = can(state.me, "manage_assignments");
-
-  $("#childTabBody").innerHTML = `
-    <div style="display:flex;justify-content:flex-end;margin-bottom:14px">
-      ${canManage ? `<button class="btn btn-primary btn-sm" id="addFollower">+ إضافة متابع</button>` : ""}
-    </div>
-    <div class="list-card">
-      ${list.length ? list.map(a => followerRow(a, canManage)).join("") : emptyRow("لسه مفيش متابعين معينين لهذا الطفل")}
-    </div>
-  `;
-  $("#addFollower")?.addEventListener("click", () => openFollowerForm(c.id));
-  $$(".js-end-follow").forEach(b => b.onclick = async () => {
-    await safeRun(update(ref(db, "assignments/" + b.dataset.id), { to: new Date().toISOString().slice(0, 10) }), { successMsg: "تم إنهاء متابعة هذا الشخص للطفل" });
-  });
-  $$(".js-del-follow").forEach(b => b.onclick = async () => {
-    await safeRun(remove(ref(db, "assignments/" + b.dataset.id)), { successMsg: "تم حذف المتابعة" });
-  });
-}
-
-function followerRow(a, canManage) {
-  const active = !a.to;
-  return `
-  <div class="row">
-    <div class="row-main">
-      <div class="row-avatar">${initials(a.staffName)}</div>
-      <div>
-        <div class="row-title">${esc(a.staffName)} <span class="tag-role ${ROLE_CLASS[a.staffRole] || "role-therapist"}">${ROLE_LABELS[a.staffRole] || a.staffRole || ""}</span></div>
-        <div class="row-sub">من ${fmtDate(a.from)} ${active ? "— لحد النهاردة (مستمر)" : "إلى " + fmtDate(a.to)}${a.notes ? " · " + esc(a.notes) : ""}</div>
-      </div>
-    </div>
-    <div class="row-actions">
-      <span class="badge ${active ? "badge-teal" : "badge-gray"}">${active ? "متابعة نشطة" : "منتهية"}</span>
-      ${canManage && active ? `<button class="btn btn-ghost btn-sm js-end-follow" data-id="${a.id}">إنهاء المتابعة</button>` : ""}
-      ${canManage ? `<button class="btn btn-danger btn-sm js-del-follow" data-id="${a.id}">حذف</button>` : ""}
-    </div>
-  </div>`;
-}
-
-function openFollowerForm(childId) {
-  const staffOptions = objToList(state.users).filter(u => u.role && u.role !== "admin" || u.role === "admin")
-    .map(u => `<option value="${u.uid}" data-role="${u.role}">${esc(u.name)} — ${ROLE_LABELS[u.role] || ""}</option>`).join("");
-  openModal(`
-    <div class="modal-head"><h3>إضافة متابع للطفل</h3><button class="modal-close" id="mClose">✕</button></div>
-    <form id="folForm">
-      <div class="field"><label>الموظف / الأخصائي</label>
-        <select id="fl_staff" required>${staffOptions}</select>
-      </div>
-      <div class="grid grid-2">
-        <div class="field"><label>من تاريخ</label><input type="date" id="fl_from" required value="${new Date().toISOString().slice(0, 10)}"></div>
-        <div class="field"><label>إلى تاريخ (اختياري — سيبها فاضية لو المتابعة مستمرة)</label><input type="date" id="fl_to"></div>
-      </div>
-      <div class="field"><label>ملاحظات</label><input type="text" id="fl_notes" placeholder="مثال: جلسات تخاطب مرتين أسبوعيًا"></div>
-      <div class="modal-actions">
-        <button type="submit" class="btn btn-primary">إضافة</button>
-        <button type="button" class="btn btn-ghost" id="mCancel">إلغاء</button>
-      </div>
-    </form>
-  `);
-  $("#mClose").onclick = $("#mCancel").onclick = closeModal;
-  $("#folForm").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const sel = $("#fl_staff");
-    const staffUid = sel.value;
-    const staffRole = sel.selectedOptions[0].dataset.role;
-    const staffName = state.users[staffUid]?.name || "";
-    const ok = await safeRun(push(ref(db, "assignments"), {
-      childId, staffUid, staffName, staffRole,
-      from: $("#fl_from").value, to: $("#fl_to").value || null,
-      notes: $("#fl_notes").value.trim(), createdAt: Date.now(), createdBy: state.authUid,
-    }), { successMsg: "تمت إضافة المتابع" });
-    if (ok) closeModal();
-  });
-}
-
-/* ---------- يوميات الطفل (نوم، أكل، حالة) ---------- */
-const MOOD_OPTIONS = { happy: "😊 سعيد", normal: "🙂 عادي", cranky: "😣 متضايق", crying: "😢 بيبكي كتير" };
-const MEAL_OPTIONS = { full: "أكل كويس", partial: "أكل جزء بسيط", refused: "رفض الأكل" };
-
-function renderDailyLogTab(c) {
-  const list = objToList(state.dailyLogs).filter(l => l.childId === c.id).sort((a, b) => (b.date || "").localeCompare(a.date || ""));
-  const canManage = can(state.me, "manage_daily_log");
-  $("#childTabBody").innerHTML = `
-    <div style="display:flex;justify-content:flex-end;margin-bottom:14px">
-      ${canManage ? `<button class="btn btn-primary btn-sm" id="addDailyLog">+ يومية جديدة</button>` : ""}
-    </div>
-    <div class="list-card">${list.length ? list.map(l => dailyLogRow(l, canManage)).join("") : emptyRow("لسه مفيش يوميات مسجّلة لهذا الطفل")}</div>
-  `;
-  $("#addDailyLog")?.addEventListener("click", () => openDailyLogForm(c.id));
-  $$(".js-del-dailylog").forEach(b => b.onclick = async () => { await safeRun(remove(ref(db, "dailyLogs/" + b.dataset.id)), { successMsg: "تم الحذف" }); });
-}
-
-function dailyLogRow(l, canManage) {
-  const bits = [];
-  if (l.sleepHours) bits.push(`نوم: ${esc(l.sleepHours)} ساعة`);
-  if (l.meal) bits.push("الأكل: " + (MEAL_OPTIONS[l.meal] || l.meal));
-  if (l.mood) bits.push(MOOD_OPTIONS[l.mood] || l.mood);
-  return `
-  <div class="row">
-    <div class="row-main">
-      <div class="row-avatar">📋</div>
-      <div>
-        <div class="row-title">${fmtDate(l.date)}</div>
-        <div class="row-sub">${bits.join(" · ") || "—"}</div>
-        ${l.notes ? `<div class="pd-notes" style="margin-top:6px">${esc(l.notes)}</div>` : ""}
-      </div>
-    </div>
-    ${canManage ? `<button class="btn btn-danger btn-sm js-del-dailylog" data-id="${l.id}">حذف</button>` : ""}
-  </div>`;
-}
-
-function openDailyLogForm(childId) {
-  openModal(`
-    <div class="modal-head"><h3>يومية جديدة</h3><button class="modal-close" id="mClose">✕</button></div>
-    <form id="dlForm">
-      <div class="field"><label>التاريخ</label><input type="date" id="dl_date" required value="${new Date().toISOString().slice(0, 10)}"></div>
-      <div class="grid grid-2">
-        <div class="field"><label>عدد ساعات النوم</label><input type="number" id="dl_sleep" min="0" max="24" step="0.5" placeholder="مثال: 2"></div>
-        <div class="field"><label>الحالة المزاجية</label>
-          <select id="dl_mood">
-            ${Object.entries(MOOD_OPTIONS).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}
-          </select>
-        </div>
-      </div>
-      <div class="field"><label>الأكل</label>
-        <select id="dl_meal">
-          ${Object.entries(MEAL_OPTIONS).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}
-        </select>
-      </div>
-      <div class="field"><label>ملاحظات (صحية أو سلوكية)</label><textarea id="dl_notes" placeholder="أي ملاحظات تحب تشارك بيها ولي الأمر أو الفريق"></textarea></div>
-      <div class="modal-actions">
-        <button type="submit" class="btn btn-primary">حفظ</button>
-        <button type="button" class="btn btn-ghost" id="mCancel">إلغاء</button>
-      </div>
-    </form>
-  `);
-  $("#mClose").onclick = $("#mCancel").onclick = closeModal;
-  $("#dlForm").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const data = {
-      childId, date: $("#dl_date").value, sleepHours: $("#dl_sleep").value || null,
-      mood: $("#dl_mood").value, meal: $("#dl_meal").value, notes: $("#dl_notes").value.trim(),
-      recordedBy: state.authUid, recordedAt: Date.now(),
-    };
-    const ok = await safeRun(push(ref(db, "dailyLogs"), data), { successMsg: "تم حفظ يومية الطفل" });
-    if (ok) closeModal();
-  });
-}
-
-/* ---------- مراحل التقدم ---------- */
-function renderProgressTab(c) {
-  const list = objToList(state.milestones).filter(m => m.childId === c.id)
-    .sort((a, b) => (b.achievedDate || "").localeCompare(a.achievedDate || ""));
-  const canManage = can(state.me, "manage_progress");
-
-  $("#childTabBody").innerHTML = `
-    <div style="display:flex;justify-content:flex-end;margin-bottom:14px">
-      ${canManage ? `<button class="btn btn-primary btn-sm" id="addMilestone">+ تسجيل مرحلة تقدم</button>` : ""}
-    </div>
-    <div class="card">
-      ${list.length ? `<div class="progress-track">${list.map(m => progressItem(m, canManage)).join("")}</div>` : emptyRow("لسه مفيش مراحل تقدم مسجّلة")}
-    </div>
-  `;
-  $("#addMilestone")?.addEventListener("click", () => openMilestoneForm(c.id));
-  $$(".js-del-mile").forEach(b => b.onclick = async () => { await safeRun(remove(ref(db, "milestones/" + b.dataset.id)), { successMsg: "تم الحذف" }); });
-}
-
-function progressItem(m, canManage) {
-  return `
-  <div class="progress-item">
-    <div style="display:flex;justify-content:space-between;align-items:flex-start">
-      <div>
-        <div class="pd-title">${esc(m.stageTitle)} <span class="badge badge-plum">${esc(m.category || "")}</span></div>
-        <div class="pd-meta">بتاريخ ${fmtDate(m.achievedDate)} — سجّلها ${esc(state.users[m.recordedBy]?.name || "")}</div>
-      </div>
-      ${canManage ? `<button class="btn btn-danger btn-sm js-del-mile" data-id="${m.id}">حذف</button>` : ""}
-    </div>
-    ${m.description ? `<div class="pd-notes">${esc(m.description)}</div>` : ""}
-  </div>`;
-}
-
-function openMilestoneForm(childId) {
-  openModal(`
-    <div class="modal-head"><h3>تسجيل مرحلة تقدم جديدة</h3><button class="modal-close" id="mClose">✕</button></div>
-    <form id="mileForm">
-      <div class="field"><label>عنوان المرحلة</label><input type="text" id="ms_title" required placeholder="مثال: نطق أول كلمة مفهومة"></div>
-      <div class="field"><label>المجال</label>
-        <select id="ms_cat">
-          <option>النطق</option><option>اللغة الاستيعابية</option><option>اللغة التعبيرية</option>
-          <option>التواصل الاجتماعي</option><option>المهارات الحركية</option><option>أخرى</option>
-        </select>
-      </div>
-      <div class="field"><label>تاريخ التحقق</label><input type="date" id="ms_date" required value="${new Date().toISOString().slice(0, 10)}"></div>
-      <div class="field"><label>وصف / ملاحظات</label><textarea id="ms_desc"></textarea></div>
-      <div class="modal-actions">
-        <button type="submit" class="btn btn-primary">حفظ</button>
-        <button type="button" class="btn btn-ghost" id="mCancel">إلغاء</button>
-      </div>
-    </form>
-  `);
-  $("#mClose").onclick = $("#mCancel").onclick = closeModal;
-  $("#mileForm").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const ok = await safeRun(push(ref(db, "milestones"), {
-      childId, stageTitle: $("#ms_title").value.trim(), category: $("#ms_cat").value,
-      achievedDate: $("#ms_date").value, description: $("#ms_desc").value.trim(),
-      recordedBy: state.authUid, recordedAt: Date.now(),
-    }), { successMsg: "تم تسجيل مرحلة التقدم" });
-    if (ok) closeModal();
-  });
-}
-
-/* ---------- الخطة العلاجية ---------- */
-function renderPlanTab(c) {
-  const list = objToList(state.plans).filter(p => p.childId === c.id).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-  const canManage = can(state.me, "manage_plans");
-
-  $("#childTabBody").innerHTML = `
-    <div style="display:flex;justify-content:flex-end;margin-bottom:14px">
-      ${canManage ? `<button class="btn btn-primary btn-sm" id="addPlan">+ خطة جديدة</button>` : ""}
-    </div>
-    <div class="grid grid-2">
-      ${list.length ? list.map(p => planCard(p, canManage)).join("") : `<div class="card empty">${emptyRow("لسه مفيش خطة علاجية لهذا الطفل")}</div>`}
-    </div>
-  `;
-  $("#addPlan")?.addEventListener("click", () => openPlanForm(c.id));
-  $$(".js-edit-plan").forEach(b => b.onclick = () => openPlanForm(c.id, b.dataset.id));
-  $$(".js-del-plan").forEach(b => b.onclick = async () => { await safeRun(remove(ref(db, "plans/" + b.dataset.id)), { successMsg: "تم الحذف" }); });
-}
-
-const PLAN_STATUS = { active: ["قيد التنفيذ", "badge-teal"], done: ["منجزة", "badge-plum"], paused: ["متوقفة", "badge-gray"] };
-function planCard(p, canManage) {
-  const st = PLAN_STATUS[p.status] || PLAN_STATUS.active;
-  return `
-  <div class="card">
-    <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
-      <h4>${esc(p.title)}</h4>
-      <span class="badge ${st[1]}">${st[0]}</span>
-    </div>
-    <div class="hint" style="margin-bottom:10px">من ${fmtDate(p.startDate)} إلى ${fmtDate(p.targetDate)}</div>
-    <p style="white-space:pre-wrap;font-size:13.5px;line-height:1.8">${esc(p.goals)}</p>
-    ${canManage ? `<div class="modal-actions" style="border:none;padding-top:12px">
-      <button class="btn btn-ghost btn-sm js-edit-plan" data-id="${p.id}">تعديل</button>
-      <button class="btn btn-danger btn-sm js-del-plan" data-id="${p.id}">حذف</button>
-    </div>` : ""}
-  </div>`;
-}
-
-function openPlanForm(childId, id) {
-  const p = id ? state.plans[id] : {};
-  openModal(`
-    <div class="modal-head"><h3>${id ? "تعديل الخطة" : "خطة علاجية جديدة"}</h3><button class="modal-close" id="mClose">✕</button></div>
-    <form id="planForm">
-      <div class="field"><label>عنوان الخطة</label><input type="text" id="pl_title" required value="${esc(p.title)}" placeholder="مثال: خطة تنمية اللغة التعبيرية"></div>
-      <div class="grid grid-2">
-        <div class="field"><label>تاريخ البدء</label><input type="date" id="pl_start" value="${p.startDate || new Date().toISOString().slice(0, 10)}"></div>
-        <div class="field"><label>التاريخ المستهدف</label><input type="date" id="pl_target" value="${p.targetDate || ""}"></div>
-      </div>
-      <div class="field"><label>الحالة</label>
-        <select id="pl_status">
-          <option value="active" ${p.status !== "done" && p.status !== "paused" ? "selected" : ""}>قيد التنفيذ</option>
-          <option value="done" ${p.status === "done" ? "selected" : ""}>منجزة</option>
-          <option value="paused" ${p.status === "paused" ? "selected" : ""}>متوقفة</option>
-        </select>
-      </div>
-      <div class="field"><label>الأهداف والخطوات</label><textarea id="pl_goals" rows="5" placeholder="اكتب الأهداف والخطوات التفصيلية للخطة">${esc(p.goals)}</textarea></div>
-      <div class="modal-actions">
-        <button type="submit" class="btn btn-primary">حفظ</button>
-        <button type="button" class="btn btn-ghost" id="mCancel">إلغاء</button>
-      </div>
-    </form>
-  `);
-  $("#mClose").onclick = $("#mCancel").onclick = closeModal;
-  $("#planForm").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const data = {
-      childId, title: $("#pl_title").value.trim(), startDate: $("#pl_start").value,
-      targetDate: $("#pl_target").value, status: $("#pl_status").value, goals: $("#pl_goals").value.trim(),
-      updatedAt: Date.now(),
-    };
-    let ok;
-    if (id) ok = await safeRun(update(ref(db, "plans/" + id), data), { successMsg: "تم حفظ الخطة" });
-    else { data.createdBy = state.authUid; data.createdAt = Date.now(); ok = await safeRun(push(ref(db, "plans"), data), { successMsg: "تم حفظ الخطة" }); }
-    if (ok) closeModal();
-  });
-}
-
-/* ---------- تقارير الطفل ---------- */
-function renderChildReportsTab(c) {
-  const list = objToList(state.reports).filter(r => r.childId === c.id).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-  const canManage = can(state.me, "manage_reports");
-  $("#childTabBody").innerHTML = `
-    <div style="display:flex;justify-content:flex-end;margin-bottom:14px">
-      ${canManage ? `<button class="btn btn-primary btn-sm" id="addReport">+ تقرير جديد</button>` : ""}
-    </div>
-    <div class="list-card">${list.length ? list.map(r => reportRow(r, canManage)).join("") : emptyRow("لسه مفيش تقارير لهذا الطفل")}</div>
-  `;
-  $("#addReport")?.addEventListener("click", () => openReportForm(c.id));
-  bindReportRowClicks(canManage);
-}
-
-const REPORT_TYPES = { session: "تقرير جلسة", monthly: "تقرير شهري", assessment: "تقرير تقييم" };
-function reportRow(r, canManage) {
-  const childName = state.children[r.childId]?.name || "";
-  return `
-  <div class="row js-view-report" data-id="${r.id}" style="cursor:pointer">
-    <div class="row-main">
-      <div class="row-avatar">📄</div>
-      <div>
-        <div class="row-title">${esc(r.title)}</div>
-        <div class="row-sub">${childName ? esc(childName) + " · " : ""}${REPORT_TYPES[r.type] || r.type} · ${fmtDate(r.date)}</div>
-      </div>
-    </div>
-    ${canManage ? `<button class="btn btn-danger btn-sm js-del-report" data-id="${r.id}">حذف</button>` : ""}
-  </div>`;
-}
-function bindReportRowClicks(canManage) {
-  $$(".js-view-report").forEach(el => el.addEventListener("click", (e) => {
-    if (e.target.closest(".js-del-report")) return;
-    viewReport(el.dataset.id);
-  }));
-  $$(".js-del-report").forEach(el => el.addEventListener("click", async (e) => {
-    e.stopPropagation();
-    await safeRun(remove(ref(db, "reports/" + el.dataset.id)), { successMsg: "تم حذف التقرير" });
-  }));
-}
-function viewReport(id) {
-  const r = state.reports[id];
-  openModal(`
-    <div class="modal-head"><h3>${esc(r.title)}</h3><button class="modal-close" id="mClose">✕</button></div>
-    <div class="hint" style="margin-bottom:12px">${state.children[r.childId]?.name ? "الطفل: " + esc(state.children[r.childId].name) + " · " : ""}${REPORT_TYPES[r.type] || r.type} · ${fmtDate(r.date)}</div>
-    <p style="white-space:pre-wrap;line-height:1.9">${esc(r.content)}</p>
-    <div class="modal-actions"><button class="btn btn-ghost" id="mCancel">إغلاق</button></div>
-  `);
-  $("#mClose").onclick = $("#mCancel").onclick = closeModal;
-}
-function openReportForm(childId) {
-  openModal(`
-    <div class="modal-head"><h3>تقرير جديد</h3><button class="modal-close" id="mClose">✕</button></div>
-    <form id="repForm">
-      <div class="field"><label>عنوان التقرير</label><input type="text" id="rp_title" required></div>
-      <div class="grid grid-2">
-        <div class="field"><label>نوع التقرير</label>
-          <select id="rp_type">
-            <option value="session">تقرير جلسة</option>
-            <option value="monthly">تقرير شهري</option>
-            <option value="assessment">تقرير تقييم</option>
-          </select>
-        </div>
-        <div class="field"><label>التاريخ</label><input type="date" id="rp_date" required value="${new Date().toISOString().slice(0, 10)}"></div>
-      </div>
-      <div class="field"><label>محتوى التقرير</label><textarea id="rp_content" rows="6" required></textarea></div>
-      <div class="modal-actions">
-        <button type="submit" class="btn btn-primary">حفظ التقرير</button>
-        <button type="button" class="btn btn-ghost" id="mCancel">إلغاء</button>
-      </div>
-    </form>
-  `);
-  $("#mClose").onclick = $("#mCancel").onclick = closeModal;
-  $("#repForm").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const ok = await safeRun(push(ref(db, "reports"), {
-      childId, title: $("#rp_title").value.trim(), type: $("#rp_type").value,
-      date: $("#rp_date").value, content: $("#rp_content").value.trim(),
-      createdBy: state.authUid, createdAt: Date.now(),
-    }), { successMsg: "تم حفظ التقرير" });
-    if (ok) closeModal();
-  });
-}
-
-/* =========================================================
-   التقارير على مستوى الحضانة كلها
-   ========================================================= */
-function renderGlobalReports() {
-  const list = objToList(state.reports).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-  viewRoot().innerHTML = `<div class="list-card">${list.length ? list.map(r => reportRow(r, can(state.me, "manage_reports"))).join("") : emptyRow("لسه مفيش تقارير")}</div>`;
-  bindReportRowClicks(can(state.me, "manage_reports"));
-}
-
-/* =========================================================
-   المستخدمون والصلاحيات (Admin فقط)
-   ========================================================= */
-function renderUsers() {
-  const list = objToList(state.users).sort((a, b) => (a.name || "").localeCompare(b.name || "", "ar"));
-  viewRoot().innerHTML = `<div class="list-card">${list.map(u => userRow(u)).join("")}</div>`;
-  $$(".js-manage-user").forEach(b => b.onclick = () => openUserPermForm(b.dataset.id));
-}
-
-function userRow(u) {
-  const pending = !u.role;
-  return `
-  <div class="row">
-    <div class="row-main">
-      <div class="row-avatar">${initials(u.name)}</div>
-      <div>
-        <div class="row-title">${esc(u.name)} ${u.uid === state.authUid ? "<span class='badge badge-gray'>أنت</span>" : ""}</div>
-        <div class="row-sub">${esc(u.email)}</div>
-      </div>
-    </div>
-    <div class="row-actions">
-      <span class="tag-role ${pending ? "role-therapist" : ROLE_CLASS[u.role]}" style="${pending ? "background:var(--rose-tint);color:var(--rose)" : ""}">${pending ? "بانتظار التفعيل" : ROLE_LABELS[u.role]}</span>
-      <button class="btn btn-ghost btn-sm js-manage-user" data-id="${u.uid}">الدور والصلاحيات</button>
-    </div>
-  </div>`;
-}
-
-function openUserPermForm(uid) {
-  const u = state.users[uid];
-  const permsHtml = PERMISSIONS.map(p => `
-    <div class="perm-item">
-      <input type="checkbox" id="perm_${p.key}" data-key="${p.key}" ${u.permissions?.[p.key] ? "checked" : ""}>
-      <label for="perm_${p.key}">${p.label}</label>
-    </div>`).join("");
-
-  openModal(`
-    <div class="modal-head"><h3>${esc(u.name)} — الدور والصلاحيات</h3><button class="modal-close" id="mClose">✕</button></div>
-    <div class="field">
-      <label>الدور الوظيفي</label>
-      <select id="userRole">
-        <option value="" ${!u.role ? "selected" : ""}>بانتظار التفعيل</option>
-        <option value="admin" ${u.role === "admin" ? "selected" : ""}>مدير النظام</option>
-        <option value="manager" ${u.role === "manager" ? "selected" : ""}>مدير الحضانة</option>
-        <option value="supervisor" ${u.role === "supervisor" ? "selected" : ""}>مشرف</option>
-        <option value="therapist" ${u.role === "therapist" ? "selected" : ""}>أخصائي تخاطب</option>
-      </select>
-      <p class="hint">اختيار دور بيحدّث الصلاحيات تلقائيًا بالإعدادات الافتراضية، وتقدر بعد كده تعدّل عليها يدويًا تحت</p>
-    </div>
-    <div class="field">
-      <label>الصلاحيات التفصيلية</label>
-      <div class="perm-grid">${permsHtml}</div>
-    </div>
-    <div class="modal-actions">
-      <button class="btn btn-primary" id="saveUserBtn">حفظ</button>
-      <button class="btn btn-ghost" id="mCancel">إلغاء</button>
-    </div>
-  `);
-  $("#mClose").onclick = $("#mCancel").onclick = closeModal;
-
-  $("#userRole").addEventListener("change", (e) => {
-    const defs = defaultPermissions(e.target.value || null);
-    PERMISSIONS.forEach(p => { $("#perm_" + p.key).checked = !!defs[p.key]; });
-  });
-
-  $("#saveUserBtn").onclick = async () => {
-    const role = $("#userRole").value || null;
-    const permissions = {};
-    PERMISSIONS.forEach(p => permissions[p.key] = $("#perm_" + p.key).checked);
-    if (uid === state.authUid && role !== "admin" && u.role === "admin") {
-      const otherAdmins = objToList(state.users).some(x => x.uid !== uid && x.role === "admin");
-      if (!otherAdmins) { toast("لازم يفضل أدمن واحد على الأقل في النظام"); return; }
-    }
-    const ok = await safeRun(update(ref(db, "users/" + uid), { role, permissions }), { successMsg: "تم تحديث بيانات المستخدم" });
-    if (ok) closeModal();
-  };
-}
+function modal(title,body){$("#modalTitle").textContent=title;$("#modalBody").innerHTML=body;$("#modal").classList.remove("hidden")}
+function closeModal(){$("#modal").classList.add("hidden");$("#modalBody").innerHTML=""}
+function childOptions(){return APP.children.length?APP.children.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join(""):`<option value="">لا يوجد أطفال — أضف طفلًا أولًا</option>`}
+function childName(id){return APP.children.find(c=>c.id===id)?.name||"—"}
+function id(){return crypto.randomUUID?.()||String(Date.now()+Math.random())}
+function today(){return new Date().toISOString().slice(0,10)}
+function esc(v=""){return String(v).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[m]))}
