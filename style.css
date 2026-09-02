@@ -25,4 +25,3 @@ input,select,textarea{width:100%;border:1px solid #d9dee7;border-radius:9px;padd
 .list{display:grid;gap:10px}.list-item{border:1px solid var(--border);padding:12px;border-radius:10px}.section-title{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
 @media(max-width:950px){.sidebar{width:220px}.main{margin-right:220px;width:calc(100% - 220px)}.stats{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:650px){.sidebar{position:static;width:100%;min-height:auto}.app{display:block}.main{margin:0;width:100%;padding:12px}.sidebar nav{grid-template-columns:1fr 1fr}.logout{margin-top:12px}.two,.stats,.form-grid{grid-template-columns:1fr}.topbar{padding:12px}}
-
