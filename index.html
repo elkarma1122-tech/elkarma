@@ -1,122 +1,63 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ar" dir="rtl">
 <head>
-<script type="importmap">
-{
-  "imports": {
-    "firebase/app": "https://www.gstatic.com/firebasejs/9.23.0/firebase-app.js",
-    "firebase/auth": "https://www.gstatic.com/firebasejs/9.23.0/firebase-auth.js",
-    "firebase/database": "https://www.gstatic.com/firebasejs/9.23.0/firebase-database.js",
-    "firebase/analytics": "https://www.gstatic.com/firebasejs/9.23.0/firebase-analytics.js"
-  }
-}
-</script>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>نظام إدارة حضانة وتخاطب</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@600;700;800;900&family=Tajawal:wght@400;500;700;900&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>نظام إدارة مركز التأهيل والتدخل المبكر</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-
-<!-- ============== شاشة الدخول / التسجيل ============== -->
-<div id="authScreen" class="auth-wrap">
-  <div class="auth-card">
-    <div class="auth-brand">
-      <div class="logo-dot">ن</div>
-      <div>
-        <h1>نظام إدارة الحضانة</h1>
-      </div>
+  <div id="loginScreen" class="login-screen">
+    <div class="login-card">
+      <div class="brand large"><span>🧩</span><div><strong>مركز التأهيل</strong><small>نظام الإدارة والمتابعة</small></div></div>
+      <h1>تسجيل الدخول</h1>
+      <p>النموذج يبدأ بدون أي بيانات جاهزة.</p>
+      <form id="loginForm">
+        <label>البريد الإلكتروني<input id="loginEmail" type="email" required placeholder="admin@example.com"></label>
+        <label>كلمة المرور<input id="loginPassword" type="password" required></label>
+        <button class="btn primary full">دخول</button>
+      </form>
+      <div class="hint">اربط النموذج بـ Firebase Authentication قبل الاستخدام الفعلي.</div>
     </div>
-    <p class="auth-sub">متابعة الأطفال، تخصصات التخاطب، الخطط والتقارير — في مكان واحد ومتزامن لحظيًا</p>
-
-    <div class="auth-tabs">
-      <button class="auth-tab active" data-authtab="login">تسجيل الدخول</button>
-      <button class="auth-tab" data-authtab="signup">حساب جديد</button>
-    </div>
-
-    <div id="authError" class="error-box hidden"></div>
-    <div id="authInfo" class="info-box hidden"></div>
-
-    <!-- دخول -->
-    <form id="loginForm">
-      <div class="field">
-        <label>اسم المستخدم</label>
-        <input type="text" id="loginUsername" required placeholder="مثال: ahmed_1">
-      </div>
-      <div class="field">
-        <label>كلمة المرور</label>
-        <input type="password" id="loginPassword" required placeholder="••••••••">
-      </div>
-      <button type="submit" class="btn btn-primary btn-full">دخول</button>
-    </form>
-
-    <!-- تسجيل جديد -->
-    <form id="signupForm" class="hidden">
-      <div class="field">
-        <label>الاسم بالكامل</label>
-        <input type="text" id="signupName" required placeholder="مثال: مروة أحمد">
-      </div>
-      <div class="field">
-        <label>اسم المستخدم</label>
-        <input type="text" id="signupUsername" required placeholder="حروف إنجليزية وأرقام فقط، مثال: marwa_1" pattern="[a-zA-Z0-9_\-]{3,20}" title="من 3 إلى 20 حرف: حروف إنجليزية، أرقام، أو شرطة سفلية (النقطة غير مسموحة)">
-      </div>
-      <div class="field">
-        <label>كلمة المرور</label>
-        <input type="password" id="signupPassword" required minlength="6" placeholder="6 أحرف على الأقل">
-      </div>
-      <button type="submit" class="btn btn-primary btn-full">إنشاء الحساب</button>
-      <p class="hint">هيتم تسجيل حسابك بصلاحيات محدودة لحد ما الأدمن يفعّل دورك (مدير / مشرف / أخصائي تخاطب).</p>
-    </form>
   </div>
-</div>
 
-<!-- ============== واجهة التطبيق ============== -->
-<div id="appScreen" class="app-shell hidden">
-  <main class="main">
-    <div class="topbar">
-      <div>
-        <h2 id="pageTitle">لوحة التحكم</h2>
-        <div class="sub" id="pageSub">نظرة عامة على الحضانة اليوم</div>
-      </div>
-      <div class="userchip">
-        <div>
-          <div style="font-weight:800;font-size:13px" id="topUserName">—</div>
-          <div style="font-size:11px;color:var(--muted)" id="topUserRole">—</div>
-        </div>
-        <div class="avatar" id="topUserAvatar">؟</div>
-        <button class="btn btn-ghost btn-sm" id="logoutBtn">خروج</button>
-      </div>
+  <div id="app" class="app hidden">
+    <aside class="sidebar">
+      <div class="brand"><span>🧩</span><div><strong>مركز التأهيل</strong><small>لوحة الإدارة</small></div></div>
+      <nav id="nav">
+        <button data-page="dashboard">الرئيسية</button>
+        <button data-page="children">ملفات الأطفال</button>
+        <button data-page="attendance">الحضور والانصراف</button>
+        <button data-page="plans">الخطط الفردية</button>
+        <button data-page="sessions">جلسات التخاطب</button>
+        <button data-page="reports">التقارير</button>
+        <button data-page="users">المستخدمون والصلاحيات</button>
+        <button data-page="settings">الإعدادات</button>
+      </nav>
+      <button id="logoutBtn" class="logout">تسجيل الخروج</button>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div><h2 id="pageTitle">الرئيسية</h2><span id="roleLabel" class="badge">مستخدم</span></div>
+        <div id="userName">—</div>
+      </header>
+      <section id="content"></section>
+    </main>
+  </div>
+
+  <div id="modal" class="modal hidden">
+    <div class="modal-box">
+      <button id="closeModal" class="modal-close">×</button>
+      <h3 id="modalTitle"></h3>
+      <div id="modalBody"></div>
     </div>
+  </div>
 
-    <div id="viewRoot"></div>
-  </main>
-
-  <aside class="sidebar">
-    <div class="brand">
-      <div class="logo-dot">ن</div>
-      <div>
-        <h1>حضانتي</h1>
-        <small>تخاطب • نمو • متابعة</small>
-      </div>
-    </div>
-
-    <button class="nav-item active" data-nav="dashboard"><span class="ic">◆</span> لوحة التحكم</button>
-    <button class="nav-item" data-nav="children"><span class="ic">◆</span> الأطفال</button>
-    <button class="nav-item" data-nav="attendance"><span class="ic">◆</span> الحضور والانصراف</button>
-    <button class="nav-item" data-nav="reports"><span class="ic">◆</span> التقارير</button>
-    <button class="nav-item hidden" data-nav="users" id="navUsers"><span class="ic">◆</span> المستخدمون والصلاحيات</button>
-
-    <div class="sidebar-footer">
-      <div style="font-size:11px;color:rgba(255,255,255,.6)">الدور الحالي</div>
-      <span class="role-chip" id="sideRoleChip">—</span>
-    </div>
-  </aside>
-</div>
-
-<div id="toastRoot"></div>
-
-<script type="module" src="app.js"></script>
+  <script src="data.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>
