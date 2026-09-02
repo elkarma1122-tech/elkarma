@@ -186,4 +186,3 @@ function childName(id){return APP.children.find(c=>c.id===id)?.name||"—"}
 function id(){return crypto.randomUUID?.()||String(Date.now()+Math.random())}
 function today(){return new Date().toISOString().slice(0,10)}
 function esc(v=""){return String(v).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[m]))}
-
